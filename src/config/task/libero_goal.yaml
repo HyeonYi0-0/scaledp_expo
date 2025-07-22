@@ -1,0 +1,42 @@
+name: libero_goal
+
+image_shape: &image_shape [3, 224, 224]
+shape_meta: &shape_meta
+  # acceptable types: rgb, low_dim
+  obs:
+    staticview:
+      shape: *image_shape
+      type: rgb
+    gripperview:
+      shape: *image_shape
+      type: rgb
+    agent_pos:
+      shape: [16]
+      type: low_dim
+  action:
+    shape: [7]
+
+# env_runner:
+#   _target_: scaledp.env_runner.libero_goal_image_runner.LiberoImageRunner
+#   fps: 10
+#   max_steps: 300
+#   n_action_steps: ${n_action_steps}
+#   n_envs: null
+#   n_obs_steps: ${n_obs_steps}
+#   n_test: 50
+#   n_test_vis: 4
+#   n_train: 6
+#   n_train_vis: 2
+#   past_action: false
+#   test_start_seed: 100000
+#   train_start_seed: 0
+
+dataset:
+  _target_: scaledp.dataset.libero_goal_image_dataset.LiberoGoalDataset
+  horizon: ${horizon}
+  max_train_episodes: 90
+  pad_after: 7
+  pad_before: 1
+  seed: ${seed}
+  val_ratio: 0.02
+  zarr_path: /home/yejun/ScaleDP_Libero/Dataset/libero_goal_single_open_the_middle_drawer.zarr        # Path to the saved zarr dataset

@@ -1,0 +1,122 @@
+defaults:
+  - _self_
+  - task: libero_goal
+
+name: train_scaleDP_hybrid
+_target_: src.workspace.train_diffusion_ScaleDP_hybrid_workspace.TrainScaleDiffusionTransformerHybridWorkspace
+
+task_name: ${task.name}
+shape_meta: ${task.shape_meta} ## ??
+exp_name: "default"
+
+horizon: 16         # Number of actions to predict during training
+n_obs_steps: 2      # Number of history observation steps
+n_action_steps: 8   # Number of actions actually used during inference
+seed: 42
+n_latency_steps: 0
+dataset_obs_steps: 2
+past_action_visible: false
+keypoint_visible_rate: 1.0
+obs_as_cond: True
+
+training:
+  checkpoint_every: 10        # Model checkpoint saving interval
+  debug: false
+  device: cuda:1
+  gradient_accumulate_every: 1
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  max_train_steps: null
+  max_val_steps: null
+  num_epochs: 2000 # 3050     # Total number of training epochs
+  resume: true
+  rollout_every: 10     # Evaluation rollout interval
+  sample_every: 5
+  seed: ${seed}
+  tqdm_interval_sec: 1.0
+  use_ema: true
+  val_every: 1
+
+policy:
+  _target_: src.policy.ScaleDP_hybrid_image_policy.ScaleDiffusionTransformerHybridImagePolicy
+
+  model_size: 'ScaleDP_S'       # ScaleDP model size -> 'ScaleDP_H', 'ScaleDP_L', 'ScaleDP_B', 'ScaleDP_S', 'ScaleDP_Ti'
+  shape_meta: ${shape_meta}
+  crop_shape: [200, 200]
+
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+    beta_end: 0.02
+    beta_schedule: squaredcos_cap_v2 ## TODO: Beta schedule: Variance preserving in EXPO
+    beta_start: 0.0001
+    clip_sample: true
+    num_train_timesteps: 100
+    prediction_type: epsilon
+    # variance_type: fixed_small
+
+  horizon: ${horizon}
+  n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
+  n_obs_steps: ${n_obs_steps}
+  num_inference_steps: 100
+  obs_encoder_group_norm: True
+  eval_fixed_crop: True
+  obs_as_cond: ${obs_as_cond}
+
+ema:
+  _target_: scaledp.model.diffusion.ema_model.EMAModel
+  inv_gamma: 1.0
+  max_value: 0.9999
+  min_value: 0.0
+  power: 0.75
+  update_after_step: 0
+
+dataloader:
+  batch_size: 64
+  num_workers: 8
+  persistent_workers: false
+  pin_memory: true
+  shuffle: true
+
+val_dataloader:
+  batch_size: 64
+  num_workers: 8
+  persistent_workers: false
+  pin_memory: true
+  shuffle: false
+
+optimizer:
+  transformer_weight_decay: 1.0e-1
+  obs_encoder_weight_decay: 1.0e-6
+  learning_rate: 1.0e-4
+  betas: [0.9, 0.99]
+
+logging:
+  project: ScaleDP_policy
+  resume: True
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "${exp_name}"]
+  id: null
+  group: null
+
+checkpoint:
+  save_last_ckpt: false
+  save_last_snapshot: false
+  topk:
+    format_str: epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt
+    k: 1
+    mode: max
+    monitor_key: test_mean_score
+
+multi_run:
+  run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  sweep:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    subdir: ${hydra.job.num}
