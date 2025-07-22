@@ -1,23 +1,63 @@
 """Implementations of algorithms for continuous control."""
 
 from functools import partial
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple, Any, Union
 
 import gym
 import jax
 import jax.numpy as jnp
 import optax
+import flax.linen as nn
+import numpy as np
 from flax import struct
 from flax.training.train_state import TrainState
 
-from jaxrl5.agents.agent import Agent
-from jaxrl5.agents.sac.temperature import Temperature
-from jaxrl5.data.dataset import DatasetDict
-from jaxrl5.distributions import TanhNormal
-from jaxrl5.networks import MLP, Ensemble, StateActionValue, subsample_ensemble
+from src.distributions import TanhNormal
+from src.model import MLP, Ensemble, StateActionValue, subsample_ensemble
+
+DataType = Union[np.ndarray, Dict[str, "DataType"]]
+
+DatasetDict = Dict[str, DataType]
+
+@partial(jax.jit, static_argnames="apply_fn")
+def _sample_actions(rng, apply_fn, params, observations: np.ndarray) -> np.ndarray:
+    key, rng = jax.random.split(rng)
+    dist = apply_fn({"params": params}, observations)
+    return dist.sample(seed=key), rng
 
 
-class SACLearner(Agent):
+@partial(jax.jit, static_argnames="apply_fn")
+def _eval_actions(apply_fn, params, observations: np.ndarray) -> np.ndarray:
+    dist = apply_fn({"params": params}, observations)
+    return dist.mode()
+
+
+class Agent(struct.PyTreeNode):
+    actor: TrainState
+    rng: Any
+
+    def eval_actions(self, observations: np.ndarray) -> np.ndarray:
+        actions = _eval_actions(self.actor.apply_fn, self.actor.params, observations)
+        return np.asarray(actions), self.replace(rng=self.rng)
+
+    def sample_actions(self, observations: np.ndarray) -> np.ndarray:
+        actions, new_rng = _sample_actions(
+            self.rng, self.actor.apply_fn, self.actor.params, observations
+        )
+        return np.asarray(actions), self.replace(rng=new_rng)
+
+class Temperature(nn.Module):
+    initial_temperature: float = 1.0
+
+    @nn.compact
+    def __call__(self) -> jnp.ndarray:
+        log_temp = self.param(
+            "log_temp",
+            init_fn=lambda key: jnp.full((), jnp.log(self.initial_temperature)),
+        )
+        return jnp.exp(log_temp)
+
+class Expo(Agent):
     critic: TrainState
     target_critic: TrainState
     temp: TrainState
