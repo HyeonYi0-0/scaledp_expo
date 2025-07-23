@@ -22,7 +22,7 @@ import shutil
 from src.workspace.base_workspace import BaseWorkspace
 from src.policy.ScaleDP_hybrid_image_policy import ScaleDiffusionTransformerHybridImagePolicy
 from src.dataset.base_dataset import BaseImageDataset
-# from src.env_runner.base_image_runner import BaseImageRunner
+from src.env_runner.base_image_runner import BaseImageRunner
 from src.common.checkpoint_util import TopKCheckpointManager
 from src.common.json_logger import JsonLogger
 from src.common.pytorch_util import dict_apply, optimizer_to
@@ -31,7 +31,7 @@ from src.model.common.lr_scheduler import get_scheduler
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
-class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
+class TrainScaleDPWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
@@ -90,8 +90,6 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
             num_training_steps=(
                 len(train_dataloader) * cfg.training.num_epochs) \
                     // cfg.training.gradient_accumulate_every,
-            # pytorch assumes stepping LRScheduler every epoch
-            # however huggingface diffusers steps it every batch
             last_epoch=self.global_step-1
         )
 
@@ -103,11 +101,11 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                 model=self.ema_model)
 
         # configure env
-        # env_runner: BaseImageRunner
-        # env_runner = hydra.utils.instantiate(
-        #     cfg.task.env_runner,
-        #     output_dir=self.output_dir)
-        # assert isinstance(env_runner, BaseImageRunner)
+        env_runner: BaseImageRunner
+        env_runner = hydra.utils.instantiate(
+            cfg.task.env_runner,
+            output_dir=self.output_dir)
+        assert isinstance(env_runner, BaseImageRunner)
 
         # configure logging
         wandb_run = wandb.init(
@@ -210,10 +208,10 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                 policy.eval()
 
                 # run rollout
-                # if (self.epoch % cfg.training.rollout_every) == 0:
-                #     runner_log = env_runner.run(policy)
-                #     # log all
-                #     step_log.update(runner_log)
+                if (self.epoch % cfg.training.rollout_every) == 0:
+                    runner_log = env_runner.run(policy)
+                    # log all
+                    step_log.update(runner_log)
 
                 # run validation
                 if (self.epoch % cfg.training.val_every) == 0:
@@ -288,7 +286,7 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
     config_path=str(pathlib.Path(__file__).parent.parent.joinpath("config")), 
     config_name=pathlib.Path(__file__).stem)
 def main(cfg):
-    workspace = TrainDiffusionTransformerHybridWorkspace(cfg)
+    workspace = TrainScaleDPWorkspace(cfg)
     workspace.run()
 
 if __name__ == "__main__":

@@ -1,53 +1,39 @@
 defaults:
   - _self_
-  - task: libero_goal
+  - task: square_image
 
-name: train_scaleDP_hybrid
-_target_: src.workspace.train_diffusion_ScaleDP_hybrid_workspace.TrainScaleDiffusionTransformerHybridWorkspace
+name: train_robomimic_image
+_target_: src.workspace.pretrain_scaledp_workspace.TrainScaleDPWorkspace
 
 task_name: ${task.name}
-shape_meta: ${task.shape_meta} ## ??
+shape_meta: ${task.shape_meta}
 exp_name: "default"
 
-horizon: 16         # Number of actions to predict during training
-n_obs_steps: 2      # Number of history observation steps
-n_action_steps: 8   # Number of actions actually used during inference
+horizon: 8
+n_obs_steps: 1
+n_action_steps: 1
 seed: 42
 n_latency_steps: 0
-dataset_obs_steps: 2
-past_action_visible: false
+dataset_obs_steps: 1
+past_action_visible: False
 keypoint_visible_rate: 1.0
 obs_as_cond: True
-
-training:
-  checkpoint_every: 10        # Model checkpoint saving interval
-  debug: false
-  device: cuda:1
-  gradient_accumulate_every: 1
-  lr_scheduler: cosine        # "cosine", "cosine_with_restarts", "constant_with_warmup", "polynomial", "linear"
-  lr_warmup_steps: 500
-  max_train_steps: null
-  max_val_steps: null
-  num_epochs: 2000 # 3050     # Total number of training epochs
-  resume: true
-  rollout_every: 10     # Evaluation rollout interval
-  sample_every: 5
-  seed: ${seed}
-  tqdm_interval_sec: 1.0
-  use_ema: true
-  val_every: 1
 
 policy:
   _target_: src.policy.ScaleDP_hybrid_image_policy.ScaleDiffusionTransformerHybridImagePolicy
 
   model_size: 'ScaleDP_S'       # ScaleDP model size -> 'ScaleDP_H', 'ScaleDP_L', 'ScaleDP_B', 'ScaleDP_S', 'ScaleDP_Ti'
   shape_meta: ${shape_meta}
-  crop_shape: [200, 200]
+  crop_shape: [76,76]           # robomimic [76, 76], libero [200, 200]
+
+  # oc.select resolver: key, default
+  task_name: ${oc.select:task.task_name,square}
+  dataset_type: ${oc.select:task.dataset_type,ph}
 
   noise_scheduler:
     _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
     beta_end: 0.02
-    beta_schedule: squaredcos_cap_v2 ## TODO: Beta schedule: Variance preserving in EXPO
+    beta_schedule: squaredcos_cap_v2 
     beta_start: 0.0001
     clip_sample: true
     num_train_timesteps: 100
@@ -63,7 +49,7 @@ policy:
   obs_as_cond: ${obs_as_cond}
 
 ema:
-  _target_: scaledp.model.diffusion.ema_model.EMAModel
+  _target_: src.model.diffusion.ema_model.EMAModel
   inv_gamma: 1.0
   max_value: 0.9999
   min_value: 0.0
@@ -84,6 +70,24 @@ val_dataloader:
   pin_memory: true
   shuffle: false
 
+training:
+  checkpoint_every: 10        # Model checkpoint saving interval
+  debug: false
+  device: cuda:1
+  gradient_accumulate_every: 1
+  lr_scheduler: cosine        # "cosine", "cosine_with_restarts", "constant_with_warmup", "polynomial", "linear"
+  lr_warmup_steps: 500
+  max_train_steps: null
+  max_val_steps: null
+  num_epochs: 700 # 3050     # Total number of training epochs
+  resume: true
+  rollout_every: 10     # Evaluation rollout interval
+  sample_every: 5
+  seed: ${seed}
+  tqdm_interval_sec: 1.0
+  use_ema: true
+  val_every: 1
+
 optimizer:
   transformer_weight_decay: 1.0e-1
   obs_encoder_weight_decay: 1.0e-6
@@ -91,7 +95,7 @@ optimizer:
   betas: [0.9, 0.99]
 
 logging:
-  project: ScaleDP_policy
+  project: diffusion_policy_debug
   resume: True
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
@@ -100,13 +104,13 @@ logging:
   group: null
 
 checkpoint:
-  save_last_ckpt: false
-  save_last_snapshot: false
   topk:
-    format_str: epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt
-    k: 1
-    mode: max
     monitor_key: test_mean_score
+    mode: max
+    k: 5
+    format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
 
 multi_run:
   run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}

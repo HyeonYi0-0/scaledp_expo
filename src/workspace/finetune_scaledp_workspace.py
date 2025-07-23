@@ -2,12 +2,8 @@
 import dmcgym
 import gym
 import tqdm
-from absl import app, flags
-from ml_collections import config_flags
 
 from src.dataset import MemoryEfficientReplayBuffer, ReplayBuffer
-# from jaxrl5.evaluation import evaluate
-# from jaxrl5.wrappers import WANDBVideo, wrap_pixels
 
 if __name__ == "__main__":
     import sys
@@ -42,41 +38,6 @@ from src.model.diffusion.ema_model import EMAModel
 from src.model.common.lr_scheduler import get_scheduler
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
-
-FLAGS = flags.FLAGS
-
-flags.DEFINE_string("project_name", "pytorch_online_pixels", "wandb project name.")
-flags.DEFINE_string("env_name", "cheetah-run-v0", "Environment name.")
-flags.DEFINE_integer("seed", 42, "Random seed.")
-flags.DEFINE_integer("eval_episodes", 10, "Number of episodes used for evaluation.")
-flags.DEFINE_integer("log_interval", 1000, "Logging interval.")
-flags.DEFINE_integer("eval_interval", 5000, "Eval interval.")
-flags.DEFINE_integer("batch_size", 256, "Mini batch size.")
-flags.DEFINE_integer("max_steps", int(5e5), "Number of training steps.")
-flags.DEFINE_integer(
-    "start_training", int(1e3), "Number of training steps to start training."
-)
-flags.DEFINE_integer("image_size", 64, "Image size.")
-flags.DEFINE_integer("num_stack", 3, "Stack frames.")
-flags.DEFINE_integer(
-    "replay_buffer_size", None, "Number of training steps to start training."
-)
-flags.DEFINE_integer(
-    "action_repeat", None, "Action repeat, if None, uses 2 or PlaNet default values."
-)
-flags.DEFINE_boolean("tqdm", True, "Use tqdm progress bar.")
-flags.DEFINE_boolean(
-    "memory_efficient_replay_buffer", True, "Use a memory efficient replay buffer."
-)
-flags.DEFINE_boolean("save_video", False, "Save videos during evaluation.")
-flags.DEFINE_string("save_dir", None, "Directory to save checkpoints.")
-flags.DEFINE_integer("utd_ratio", 1, "Update to data ratio.")
-config_flags.DEFINE_config_file(
-    "config",
-    "configs/drq_config.py",
-    "File path to the training hyperparameter configuration.",
-    lock_config=False,
-)
 
 PLANET_ACTION_REPEAT = {
     "cartpole-swingup-v0": 8,
@@ -145,7 +106,7 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
             cfg.training.lr_scheduler,
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
-            num_training_steps=(FLAGS.max_steps // action_repeat),
+            num_training_steps=(cfg.max_steps // action_repeat),
             # pytorch assumes stepping LRScheduler every epoch
             # however huggingface diffusers steps it every batch
             last_epoch=self.global_step-1
@@ -177,10 +138,10 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
             }
         )
         
-        action_repeat = FLAGS.action_repeat or PLANET_ACTION_REPEAT.get(FLAGS.env_name, 2)
+        action_repeat = cfg.action_repeat or PLANET_ACTION_REPEAT.get(cfg.env_name, 2)
 
         def wrap(env):
-            if "quadruped" in FLAGS.env_name:
+            if "quadruped" in cfg.env_name:
                 camera_id = 2
             else:
                 camera_id = 0
@@ -189,42 +150,42 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
             # return wrap_pixels(
             #     env,
             #     action_repeat=action_repeat,
-            #     image_size=FLAGS.image_size,
-            #     num_stack=FLAGS.num_stack,
+            #     image_size=cfg.image_size,
+            #     num_stack=cfg.num_stack,
             #     camera_id=camera_id,
             # )
 
-        env = gym.make(FLAGS.env_name)
+        env = gym.make(cfg.env_name)
         # env, pixel_keys = wrap(env)
         env = gym.wrappers.RecordEpisodeStatistics(env, deque_size=1)
-        if FLAGS.save_video:
+        if cfg.save_video:
             # TODO: 
             # env = WANDBVideo(env)
             pass
-        env.seed(FLAGS.seed)
+        env.seed(cfg.seed)
 
-        eval_env = gym.make(FLAGS.env_name)
+        eval_env = gym.make(cfg.env_name)
         eval_env, _ = wrap(eval_env)
-        eval_env.seed(FLAGS.seed + 42)
+        eval_env.seed(cfg.seed + 42)
 
-        kwargs = dict(FLAGS.config)
+        kwargs = dict(cfg.agent)
         model_cls = kwargs.pop("model_cls")
         agent = Expo.create(
-            FLAGS.seed,
+            cfg.seed,
             env.observation_space,
             env.action_space,
             # pixel_keys=pixel_keys,
             **kwargs,
         )
         
-        replay_buffer_size = FLAGS.replay_buffer_size or FLAGS.max_steps // action_repeat
-        if FLAGS.memory_efficient_replay_buffer:
+        replay_buffer_size = cfg.replay_buffer_size or cfg.max_steps // action_repeat
+        if cfg.memory_efficient_replay_buffer:
             replay_buffer = MemoryEfficientReplayBuffer(
                 env.observation_space, env.action_space, replay_buffer_size
             )
             replay_buffer_iterator = replay_buffer.get_iterator(
                 sample_args={
-                    "batch_size": FLAGS.batch_size * FLAGS.utd_ratio,
+                    "batch_size": cfg.batch_size * cfg.utd_ratio,
                     "pack_obs_and_next_obs": True,
                 }
             )
@@ -234,11 +195,11 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
             )
             replay_buffer_iterator = replay_buffer.get_iterator(
                 sample_args={
-                    "batch_size": FLAGS.batch_size * FLAGS.utd_ratio,
+                    "batch_size": cfg.batch_size * cfg.utd_ratio,
                 }
             )
 
-        replay_buffer.seed(FLAGS.seed)
+        replay_buffer.seed(cfg.seed)
 
         # configure checkpoint
         topk_manager = TopKCheckpointManager(
@@ -272,11 +233,11 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
             step_log = dict()
             train_losses = list()
             for i in tqdm.tqdm(
-                range(1, FLAGS.max_steps // action_repeat + 1),
+                range(1, cfg.max_steps // action_repeat + 1),
                 smoothing=0.1,
-                disable=not FLAGS.tqdm,
+                disable=not cfg.tqdm,
             ):
-                if i < FLAGS.start_training:
+                if i < cfg.start_training:
                     action = env.action_space.sample()
                 else:
                     action, agent = agent.sample_actions(observation)
@@ -305,9 +266,9 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                         decode = {"r": "return", "l": "length", "t": "time"}
                         wandb.log({f"training/{decode[k]}": v}, step=i * action_repeat)
 
-                if i >= FLAGS.start_training:
+                if i >= cfg.start_training:
                     batch = next(replay_buffer_iterator)
-                    agent, update_info, mini_batch = agent.update(batch, FLAGS.utd_ratio)
+                    agent, update_info, mini_batch = agent.update(batch, cfg.utd_ratio)
                     
                     batch = dict_apply(mini_batch, lambda x: x.to(device, non_blocking=True))
                     if train_sampling_batch is None:
@@ -338,7 +299,7 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                         'lr': lr_scheduler.get_last_lr()[0]
                     }
 
-                    if i % FLAGS.log_interval == 0:
+                    if i % cfg.log_interval == 0:
                         # replace train_loss with log_interval average
                         train_loss = np.mean(train_losses)
                         step_log['train_loss'] = train_loss
@@ -348,19 +309,19 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
                         step_log = dict()
                         train_losses = list()
 
-                if i % FLAGS.eval_interval == 0:   
+                if i % cfg.eval_interval == 0:   
                     # TODO:                  
                     # eval_info = evaluate(
                     #     agent,
                     #     eval_env,
-                    #     num_episodes=FLAGS.eval_episodes,
-                    #     save_video=FLAGS.save_video,
+                    #     num_episodes=cfg.eval_episodes,
+                    #     save_video=cfg.save_video,
                     # )
                     # for k, v in eval_info.items():
                     #     wandb.log({f"evaluation/{k}": v}, step=i * action_repeat)
 
-                    if FLAGS.save_dir is not None:
-                        checkpoint_path = os.path.join(FLAGS.save_dir, f"checkpoint_{i * action_repeat}.pt")
+                    if cfg.save_dir is not None:
+                        checkpoint_path = os.path.join(cfg.save_dir, f"checkpoint_{i * action_repeat}.pt")
                         torch.save({
                             'agent_state_dict': agent.state_dict() if hasattr(agent, 'state_dict') else agent,
                             'step': i * action_repeat,

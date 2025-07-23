@@ -44,6 +44,8 @@ class ScaleDiffusionTransformerHybridImagePolicy(BaseImagePolicy):
             obs_as_cond=True,
             pred_action_steps_only=False,
             model_size="none",
+            task_name="square",
+            dataset_type="ph",
             # parameters passed to step
             **kwargs):
         super().__init__()
@@ -76,9 +78,9 @@ class ScaleDiffusionTransformerHybridImagePolicy(BaseImagePolicy):
         config = get_robomimic_config(
             algo_name='bc_rnn',
             hdf5_type='image',
-            task_name='square',
-            dataset_type='ph')
-        
+            task_name=task_name,
+            dataset_type=dataset_type)
+
         with config.unlocked():
             # set config with shape_meta
             config.observation.modalities.obs = obs_config

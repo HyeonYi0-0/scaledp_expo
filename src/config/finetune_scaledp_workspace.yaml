@@ -1,0 +1,124 @@
+# Configuration for ScaleDP Finetuning Workspace
+defaults:
+  - _self_
+
+# Project settings
+project_name: "pytorch_online_pixels"
+env_name: "cheetah-run-v0"
+seed: 42
+
+# Evaluation settings
+eval_episodes: 10
+log_interval: 1000
+eval_interval: 5000
+
+# Training settings
+batch_size: 256
+max_steps: 500000  # 5e5
+start_training: 1000  # 1e3
+
+# Environment settings
+image_size: 64
+num_stack: 3
+replay_buffer_size: null  # Will use max_steps // action_repeat if null
+action_repeat: null  # Will use PLANET defaults if null
+
+# UI and logging
+tqdm: true
+save_video: false
+save_dir: null
+
+# Buffer settings
+memory_efficient_replay_buffer: true
+utd_ratio: 1
+
+# Agent configuration
+agent:
+  edit_policy_lr: 3e-4
+  critic_lr: 3e-4
+  temp_lr: 3e-4
+  hidden_dims: [256, 256, 256]
+  discount: 0.99
+  tau: 0.005
+  num_qs: 2
+  num_min_qs: null
+  critic_dropout_rate: null
+  critic_layer_norm: false
+  target_entropy: null
+  init_temperature: 1.0
+  backup_entropy: true
+
+# Training configuration
+training:
+  seed: 42
+  device: "cpu"  # or "cuda"
+  use_ema: false
+  lr_scheduler: "cosine"
+  lr_warmup_steps: 1000
+  gradient_accumulate_every: 1
+  debug: false
+  resume: false
+  num_epochs: 1000
+  max_train_steps: 10000
+  max_val_steps: 1000
+  rollout_every: 100
+  checkpoint_every: 1000
+  val_every: 100
+  sample_every: 100
+
+# Checkpointing
+checkpoint:
+  save_last_ckpt: true
+  save_last_snapshot: true
+  topk:
+    metric_key: "train_loss"
+    mode: "min"
+    k: 5
+    format_str: "epoch_{epoch:04d}_loss_{train_loss:.4f}.ckpt"
+
+# Logging configuration
+logging:
+  project: "scaledp_expo"
+  entity: null
+  name: null
+  tags: []
+  notes: ""
+  mode: "online"  # or "offline", "disabled"
+
+# Optimizer configuration
+optimizer:
+  _target_: "torch.optim.AdamW"
+  lr: 1e-4
+  weight_decay: 1e-2
+
+# EMA configuration (if use_ema is true)
+ema:
+  _target_: "src.model.diffusion.ema_model.EMAModel"
+  decay: 0.995
+  update_every: 10
+
+# Task configuration
+task:
+  dataset:
+    _target_: "src.dataset.base_dataset.BaseImageDataset"
+    # Add dataset-specific parameters here
+
+# Policy configuration (ScaleDP model)
+policy:
+  _target_: "src.policy.ScaleDP_hybrid_image_policy.ScaleDiffusionTransformerHybridImagePolicy"
+  # Add policy-specific parameters here
+
+# DataLoader configuration
+dataloader:
+  batch_size: 256
+  shuffle: true
+  num_workers: 4
+  pin_memory: true
+  drop_last: true
+
+val_dataloader:
+  batch_size: 256
+  shuffle: false
+  num_workers: 4
+  pin_memory: true
+  drop_last: false
