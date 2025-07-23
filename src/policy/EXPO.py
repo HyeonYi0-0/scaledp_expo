@@ -1,278 +1,317 @@
 """Implementations of algorithms for continuous control."""
 
 from functools import partial
-from typing import Dict, Optional, Sequence, Tuple, Any, Union
+from typing import Dict, Optional, Sequence, Tuple, Any, Union, Type
+import copy
 
 import gym
-import jax
-import jax.numpy as jnp
-import optax
-import flax.linen as nn
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
 import numpy as np
-from flax import struct
-from flax.training.train_state import TrainState
 
 from src.distributions import TanhNormal
 from src.model import MLP, Ensemble, StateActionValue, subsample_ensemble
 
-DataType = Union[np.ndarray, Dict[str, "DataType"]]
-
+DataType = Union[np.ndarray, torch.Tensor, Dict[str, "DataType"]]
 DatasetDict = Dict[str, DataType]
 
-@partial(jax.jit, static_argnames="apply_fn")
-def _sample_actions(rng, apply_fn, params, observations: np.ndarray) -> np.ndarray:
-    key, rng = jax.random.split(rng)
-    dist = apply_fn({"params": params}, observations)
-    return dist.sample(seed=key), rng
+def _sample_actions(actor_network, observations: torch.Tensor) -> torch.Tensor:
+    with torch.no_grad():
+        dist = actor_network(observations)
+        actions = dist.sample()
+    return actions
 
+def _eval_actions(actor_network, observations: torch.Tensor) -> torch.Tensor:
+    with torch.no_grad():
+        # Use the actor network's get_mode method for deterministic actions
+        if hasattr(actor_network, 'get_mode'):
+            actions = actor_network.get_mode(observations)
+        else:
+            # Fallback: use mean of the distribution
+            dist = actor_network(observations)
+            if hasattr(dist, 'mode'):
+                actions = dist.mode()
+            else:
+                # For Independent distributions, get the mean
+                actions = dist.base_dist.loc
+                if hasattr(actor_network, 'squash_tanh') and actor_network.squash_tanh:
+                    actions = torch.tanh(actions)
+    return actions
 
-@partial(jax.jit, static_argnames="apply_fn")
-def _eval_actions(apply_fn, params, observations: np.ndarray) -> np.ndarray:
-    dist = apply_fn({"params": params}, observations)
-    return dist.mode()
+class Agent:
+    def __init__(self, actor, device='cpu'):
+        self.actor = actor
+        self.device = device
 
+    def eval_actions(self, observations: np.ndarray) -> Tuple[np.ndarray, 'Agent']:
+        obs_tensor = torch.from_numpy(observations).float().to(self.device)
+        if obs_tensor.dim() == 1:
+            obs_tensor = obs_tensor.unsqueeze(0)
+        actions = _eval_actions(self.actor, obs_tensor)
+        return actions.cpu().numpy(), self
 
-class Agent(struct.PyTreeNode):
-    actor: TrainState
-    rng: Any
-
-    def eval_actions(self, observations: np.ndarray) -> np.ndarray:
-        actions = _eval_actions(self.actor.apply_fn, self.actor.params, observations)
-        return np.asarray(actions), self.replace(rng=self.rng)
-
-    def sample_actions(self, observations: np.ndarray) -> np.ndarray:
-        actions, new_rng = _sample_actions(
-            self.rng, self.actor.apply_fn, self.actor.params, observations
-        )
-        return np.asarray(actions), self.replace(rng=new_rng)
+    def sample_actions(self, observations: np.ndarray) -> Tuple[np.ndarray, 'Agent']:
+        obs_tensor = torch.from_numpy(observations).float().to(self.device)
+        if obs_tensor.dim() == 1:
+            obs_tensor = obs_tensor.unsqueeze(0)
+        actions = _sample_actions(self.actor, obs_tensor)
+        return actions.cpu().numpy(), self
 
 class Temperature(nn.Module):
-    initial_temperature: float = 1.0
+    def __init__(self, initial_temperature: float = 1.0):
+        super().__init__()
+        self.log_temp = nn.Parameter(torch.log(torch.tensor(initial_temperature)))
 
-    @nn.compact
-    def __call__(self) -> jnp.ndarray:
-        log_temp = self.param(
-            "log_temp",
-            init_fn=lambda key: jnp.full((), jnp.log(self.initial_temperature)),
-        )
-        return jnp.exp(log_temp)
+    def forward(self) -> torch.Tensor:
+        return torch.exp(self.log_temp)
 
 class Expo(Agent):
-    critic: TrainState
-    target_critic: TrainState
-    temp: TrainState
-    tau: float
-    discount: float
-    target_entropy: float
-    num_qs: int = struct.field(pytree_node=False)
-    num_min_qs: Optional[int] = struct.field(
-        pytree_node=False
-    )  # See M in RedQ https://arxiv.org/abs/2101.05982
-    backup_entropy: bool = struct.field(pytree_node=False)
+    def __init__(self, actor, critic, target_critic, temp, optimizer_actor, optimizer_critic, optimizer_temp,
+                 tau: float, discount: float, target_entropy: float, num_qs: int = 2,
+                 num_min_qs: Optional[int] = None, backup_entropy: bool = True, device='cpu'):
+        super().__init__(actor, device)
+        self.critic = critic
+        self.target_critic = target_critic
+        self.temp = temp
+        self.optimizer_actor = optimizer_actor
+        self.optimizer_critic = optimizer_critic
+        self.optimizer_temp = optimizer_temp
+        self.tau = tau
+        self.discount = discount
+        self.target_entropy = target_entropy
+        self.num_qs = num_qs
+        self.num_min_qs = num_min_qs or num_qs
+        self.backup_entropy = backup_entropy
 
     @classmethod
-    def create(
-        cls,
-        seed: int,
-        observation_space: gym.Space,
-        action_space: gym.Space,
-        actor_lr: float = 3e-4,
-        critic_lr: float = 3e-4,
-        temp_lr: float = 3e-4,
-        hidden_dims: Sequence[int] = (256, 256),
-        discount: float = 0.99,
-        tau: float = 0.005,
-        num_qs: int = 2,
-        num_min_qs: Optional[int] = None,
-        critic_dropout_rate: Optional[float] = None,
-        critic_layer_norm: bool = False,
-        target_entropy: Optional[float] = None,
-        init_temperature: float = 1.0,
-        backup_entropy: bool = True,
-    ):
+    def create(cls,
+               seed: int,
+               observation_space: gym.Space,
+               action_space: gym.Space,
+               edit_policy_lr: float = 3e-4,
+               critic_lr: float = 3e-4,
+               temp_lr: float = 3e-4,
+               hidden_dims: Sequence[int] = (256, 256, 256),
+               discount: float = 0.99,
+               tau: float = 0.005,
+               num_qs: int = 2,
+               num_min_qs: Optional[int] = None,
+               critic_dropout_rate: Optional[float] = None,
+               critic_layer_norm: bool = False,
+               target_entropy: Optional[float] = None,
+               init_temperature: float = 1.0,
+               backup_entropy: bool = True,
+               device: str = 'cpu'):
         """
-        An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
+        PyTorch implementation of Soft-Actor-Critic
         """
+        torch.manual_seed(seed)
+        np.random.seed(seed)
 
         action_dim = action_space.shape[-1]
-        observations = observation_space.sample()
-        actions = action_space.sample()
+        obs_dim = observation_space.shape[-1]
 
         if target_entropy is None:
             target_entropy = -action_dim / 2
 
-        rng = jax.random.PRNGKey(seed)
-        rng, actor_key, critic_key, temp_key = jax.random.split(rng, 4)
+        # Create actor network  
+        actor_hidden_dims = [obs_dim] + list(hidden_dims)
+        actor_base_cls = partial(MLP, hidden_dims=actor_hidden_dims, activate_final=True)
+        actor = TanhNormal(actor_base_cls, action_dim).to(device)
+        optimizer_actor = optim.Adam(actor.parameters(), lr=edit_policy_lr)
 
-        actor_base_cls = partial(MLP, hidden_dims=hidden_dims, activate_final=True)
-        actor_def = TanhNormal(actor_base_cls, action_dim)
-        actor_params = actor_def.init(actor_key, observations)["params"]
-        actor = TrainState.create(
-            apply_fn=actor_def.apply,
-            params=actor_params,
-            tx=optax.adam(learning_rate=actor_lr),
-        )
+        # Create critic ensemble
+        critic_hidden_dims = list(hidden_dims)
+        critic_base_cls = partial(MLP, 
+                                activate_final=True,
+                                dropout_rate=critic_dropout_rate,
+                                use_layer_norm=critic_layer_norm)
+        
+        critic_networks = []
+        for _ in range(num_qs):
+            critic_net = StateActionValue(critic_base_cls, 
+                                        input_dim=obs_dim + action_dim,
+                                        hidden_dims=critic_hidden_dims).to(device)
+            critic_networks.append(critic_net)
+        
+        critic = nn.ModuleList(critic_networks)
+        
+        # Create target critic (deep copy)
+        target_critic = copy.deepcopy(critic)
+        
+        # Create optimizers
+        critic_params = []
+        for net in critic:
+            critic_params.extend(net.parameters())
+        optimizer_critic = optim.Adam(critic_params, lr=critic_lr)
 
-        critic_base_cls = partial(
-            MLP,
-            hidden_dims=hidden_dims,
-            activate_final=True,
-            dropout_rate=critic_dropout_rate,
-            use_layer_norm=critic_layer_norm,
-        )
-        critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
-        critic_def = Ensemble(critic_cls, num=num_qs)
-        critic_params = critic_def.init(critic_key, observations, actions)["params"]
-        critic = TrainState.create(
-            apply_fn=critic_def.apply,
-            params=critic_params,
-            tx=optax.adam(learning_rate=critic_lr),
-        )
-        target_critic_def = Ensemble(critic_cls, num=num_min_qs or num_qs)
-        target_critic = TrainState.create(
-            apply_fn=target_critic_def.apply,
-            params=critic_params,
-            tx=optax.GradientTransformation(lambda _: None, lambda _: None),
-        )
+        # Create temperature
+        temp = Temperature(init_temperature).to(device)
+        optimizer_temp = optim.Adam(temp.parameters(), lr=temp_lr)
 
-        temp_def = Temperature(init_temperature)
-        temp_params = temp_def.init(temp_key)["params"]
-        temp = TrainState.create(
-            apply_fn=temp_def.apply,
-            params=temp_params,
-            tx=optax.adam(learning_rate=temp_lr),
-        )
+        return cls(actor=actor, 
+                  critic=critic,
+                  target_critic=target_critic,
+                  temp=temp,
+                  optimizer_actor=optimizer_actor,
+                  optimizer_critic=optimizer_critic,
+                  optimizer_temp=optimizer_temp,
+                  tau=tau,
+                  discount=discount,
+                  target_entropy=target_entropy,
+                  num_qs=num_qs,
+                  num_min_qs=num_min_qs,
+                  backup_entropy=backup_entropy,
+                  device=device)
 
-        return cls(
-            rng=rng,
-            actor=actor,
-            critic=critic,
-            target_critic=target_critic,
-            temp=temp,
-            target_entropy=target_entropy,
-            tau=tau,
-            discount=discount,
-            num_qs=num_qs,
-            num_min_qs=num_min_qs,
-            backup_entropy=backup_entropy,
-        )
+    def update_actor(self, batch: DatasetDict) -> Tuple['Expo', Dict[str, float]]:
+        observations = torch.from_numpy(batch["observations"]).float().to(self.device)
+        
+        self.optimizer_actor.zero_grad()
+        
+        # Sample actions from current policy
+        dist = self.actor(observations)
+        actions = dist.sample()
+        log_probs = dist.log_prob(actions)
+        
+        # Get Q-values from all critics
+        q_values = []
+        for critic_net in self.critic:
+            q_val = critic_net(observations, actions)
+            q_values.append(q_val)
+        
+        # Average Q-values
+        q_values = torch.stack(q_values, dim=0).mean(dim=0)
+        
+        # Actor loss: maximize Q - temperature * log_prob
+        temperature = self.temp()
+        actor_loss = (temperature * log_probs - q_values).mean()
+        
+        actor_loss.backward()
+        self.optimizer_actor.step()
+        
+        return self, {
+            "edit_loss": actor_loss.item(),
+            "entropy": -log_probs.mean().item()
+        }
 
-    def update_actor(self, batch: DatasetDict) -> Tuple[Agent, Dict[str, float]]:
-        key, rng = jax.random.split(self.rng)
-        key2, rng = jax.random.split(rng)
+    def update_temperature(self, entropy: float) -> Tuple['Expo', Dict[str, float]]:
+        self.optimizer_temp.zero_grad()
+        
+        temperature = self.temp()
+        temp_loss = temperature * (entropy - self.target_entropy)
+        
+        temp_loss.backward()
+        self.optimizer_temp.step()
+        
+        return self, {
+            "temperature": temperature.item(),
+            "temperature_loss": temp_loss.item()
+        }
 
-        def actor_loss_fn(actor_params) -> Tuple[jnp.ndarray, Dict[str, float]]:
-            dist = self.actor.apply_fn({"params": actor_params}, batch["observations"])
-            actions = dist.sample(seed=key)
-            log_probs = dist.log_prob(actions)
-            qs = self.critic.apply_fn(
-                {"params": self.critic.params},
-                batch["observations"],
-                actions,
-                True,
-                rngs={"dropout": key2},
-            )  # training=True
-            q = qs.mean(axis=0)
-            actor_loss = (
-                log_probs * self.temp.apply_fn({"params": self.temp.params}) - q
-            ).mean()
-            return actor_loss, {"actor_loss": actor_loss, "entropy": -log_probs.mean()}
+    def update_critic(self, batch: DatasetDict) -> Tuple['Expo', Dict[str, float]]:
+        observations = torch.from_numpy(batch["observations"]).float().to(self.device)
+        actions = torch.from_numpy(batch["actions"]).float().to(self.device)
+        rewards = torch.from_numpy(batch["rewards"]).float().to(self.device)
+        next_observations = torch.from_numpy(batch["next_observations"]).float().to(self.device)
+        masks = torch.from_numpy(batch["masks"]).float().to(self.device)
+        
+        self.optimizer_critic.zero_grad()
+        
+        with torch.no_grad():
+            # Sample next actions from policy
+            next_dist = self.actor(next_observations)
+            next_actions = next_dist.sample()
+            
+            # Get target Q-values (use subset for REDQ if specified)
+            target_q_values = []
+            critics_to_use = self.target_critic[:self.num_min_qs]
+            
+            for target_critic_net in critics_to_use:
+                target_q = target_critic_net(next_observations, next_actions)
+                target_q_values.append(target_q)
+            
+            # Take minimum for conservative estimate
+            target_q = torch.stack(target_q_values, dim=0).min(dim=0)[0]
+            
+            # Compute target
+            target_q = rewards + self.discount * masks * target_q
+            
+            if self.backup_entropy:
+                next_log_probs = next_dist.log_prob(next_actions)
+                temperature = self.temp()
+                target_q -= self.discount * masks * temperature * next_log_probs
+        
+        # Compute critic loss
+        critic_losses = []
+        q_predictions = []
+        
+        for critic_net in self.critic:
+            q_pred = critic_net(observations, actions)
+            critic_loss = F.mse_loss(q_pred, target_q)
+            critic_losses.append(critic_loss)
+            q_predictions.append(q_pred)
+        
+        total_critic_loss = sum(critic_losses)
+        total_critic_loss.backward()
+        self.optimizer_critic.step()
+        
+        # Soft update target networks
+        with torch.no_grad():
+            for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
+                target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+        
+        return self, {
+            "critic_loss": total_critic_loss.item(),
+            "q": torch.stack(q_predictions, dim=0).mean().item()
+        }
 
-        grads, actor_info = jax.grad(actor_loss_fn, has_aux=True)(self.actor.params)
-        actor = self.actor.apply_gradients(grads=grads)
-
-        return self.replace(actor=actor, rng=rng), actor_info
-
-    def update_temperature(self, entropy: float) -> Tuple[Agent, Dict[str, float]]:
-        def temperature_loss_fn(temp_params):
-            temperature = self.temp.apply_fn({"params": temp_params})
-            temp_loss = temperature * (entropy - self.target_entropy).mean()
-            return temp_loss, {
-                "temperature": temperature,
-                "temperature_loss": temp_loss,
-            }
-
-        grads, temp_info = jax.grad(temperature_loss_fn, has_aux=True)(self.temp.params)
-        temp = self.temp.apply_gradients(grads=grads)
-
-        return self.replace(temp=temp), temp_info
-
-    def update_critic(self, batch: DatasetDict) -> Tuple[TrainState, Dict[str, float]]:
-
-        dist = self.actor.apply_fn(
-            {"params": self.actor.params}, batch["next_observations"]
-        )
-
-        rng = self.rng
-
-        key, rng = jax.random.split(rng)
-        next_actions = dist.sample(seed=key)
-
-        # Used only for REDQ.
-        key, rng = jax.random.split(rng)
-        target_params = subsample_ensemble(
-            key, self.target_critic.params, self.num_min_qs, self.num_qs
-        )
-
-        key, rng = jax.random.split(rng)
-        next_qs = self.target_critic.apply_fn(
-            {"params": target_params},
-            batch["next_observations"],
-            next_actions,
-            True,
-            rngs={"dropout": key},
-        )  # training=True
-        next_q = next_qs.min(axis=0)
-
-        target_q = batch["rewards"] + self.discount * batch["masks"] * next_q
-
-        if self.backup_entropy:
-            next_log_probs = dist.log_prob(next_actions)
-            target_q -= (
-                self.discount
-                * batch["masks"]
-                * self.temp.apply_fn({"params": self.temp.params})
-                * next_log_probs
-            )
-
-        key, rng = jax.random.split(rng)
-
-        def critic_loss_fn(critic_params) -> Tuple[jnp.ndarray, Dict[str, float]]:
-            qs = self.critic.apply_fn(
-                {"params": critic_params},
-                batch["observations"],
-                batch["actions"],
-                True,
-                rngs={"dropout": key},
-            )  # training=True
-            critic_loss = ((qs - target_q) ** 2).mean()
-            return critic_loss, {"critic_loss": critic_loss, "q": qs.mean()}
-
-        grads, info = jax.grad(critic_loss_fn, has_aux=True)(self.critic.params)
-        critic = self.critic.apply_gradients(grads=grads)
-
-        target_critic_params = optax.incremental_update(
-            critic.params, self.target_critic.params, self.tau
-        )
-        target_critic = self.target_critic.replace(params=target_critic_params)
-
-        return self.replace(critic=critic, target_critic=target_critic, rng=rng), info
-
-    @partial(jax.jit, static_argnames="utd_ratio")
     def update(self, batch: DatasetDict, utd_ratio: int):
-
         new_agent = self
+        
+        # Update critic multiple times (UTD ratio)
         for i in range(utd_ratio):
-
-            def slice(x):
-                assert x.shape[0] % utd_ratio == 0
-                batch_size = x.shape[0] // utd_ratio
-                return x[batch_size * i : batch_size * (i + 1)]
-
-            mini_batch = jax.tree_util.tree_map(slice, batch)
+            # Create mini-batch for this update
+            batch_size = len(batch["observations"]) // utd_ratio
+            start_idx = batch_size * i
+            end_idx = batch_size * (i + 1)
+            
+            mini_batch = {}
+            for key, value in batch.items():
+                mini_batch[key] = value[start_idx:end_idx]
+            
             new_agent, critic_info = new_agent.update_critic(mini_batch)
-
+        
+        # Update actor once
         new_agent, actor_info = new_agent.update_actor(mini_batch)
+        
+        # Update temperature once
         new_agent, temp_info = new_agent.update_temperature(actor_info["entropy"])
+        
+        return new_agent, mini_batch, {**actor_info, **critic_info, **temp_info}
 
-        return new_agent, {**actor_info, **critic_info, **temp_info}
+    def state_dict(self):
+        """Return state dict for saving model"""
+        return {
+            'actor': self.actor.state_dict(),
+            'critic': [net.state_dict() for net in self.critic],
+            'target_critic': [net.state_dict() for net in self.target_critic],
+            'temp': self.temp.state_dict(),
+            'optimizer_actor': self.optimizer_actor.state_dict(),
+            'optimizer_critic': self.optimizer_critic.state_dict(),
+            'optimizer_temp': self.optimizer_temp.state_dict(),
+        }
+    
+    def load_state_dict(self, state_dict):
+        """Load state dict"""
+        self.actor.load_state_dict(state_dict['actor'])
+        for i, net_state in enumerate(state_dict['critic']):
+            self.critic[i].load_state_dict(net_state)
+        for i, net_state in enumerate(state_dict['target_critic']):
+            self.target_critic[i].load_state_dict(net_state)
+        self.temp.load_state_dict(state_dict['temp'])
+        self.optimizer_actor.load_state_dict(state_dict['optimizer_actor'])
+        self.optimizer_critic.load_state_dict(state_dict['optimizer_critic'])
+        self.optimizer_temp.load_state_dict(state_dict['optimizer_temp'])

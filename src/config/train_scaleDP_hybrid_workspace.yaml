@@ -24,7 +24,7 @@ training:
   debug: false
   device: cuda:1
   gradient_accumulate_every: 1
-  lr_scheduler: cosine
+  lr_scheduler: cosine        # "cosine", "cosine_with_restarts", "constant_with_warmup", "polynomial", "linear"
   lr_warmup_steps: 500
   max_train_steps: null
   max_val_steps: null

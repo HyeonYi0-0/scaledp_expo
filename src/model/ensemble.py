@@ -1,37 +1,29 @@
 from typing import Type
-
-import flax.linen as nn
-import jax
-import jax.numpy as jnp
-
+import torch
+import torch.nn as nn
 
 class Ensemble(nn.Module):
-    net_cls: Type[nn.Module]
-    num: int = 2
+    def __init__(self, net_cls: Type[nn.Module], num: int = 2, **kwargs):
+        super().__init__()
+        self.net_cls = net_cls
+        self.num = num
+        
+        # Create ensemble of networks
+        self.networks = nn.ModuleList([
+            net_cls(**kwargs) for _ in range(num)
+        ])
 
-    @nn.compact
-    def __call__(self, *args):
-        ensemble = nn.vmap(
-            self.net_cls,
-            variable_axes={"params": 0},
-            split_rngs={"params": True, "dropout": True},
-            in_axes=None,
-            out_axes=0,
-            axis_size=self.num,
-        )
-        return ensemble()(*args)
+    def forward(self, *args, **kwargs):
+        outputs = []
+        for network in self.networks:
+            output = network(*args, **kwargs)
+            outputs.append(output)
+        return torch.stack(outputs, dim=0)
 
-
-def subsample_ensemble(key: jax.random.PRNGKey, params, num_sample: int, num_qs: int):
-    if num_sample is not None:
-        all_indx = jnp.arange(0, num_qs)
-        indx = jax.random.choice(key, a=all_indx, shape=(num_sample,), replace=False)
-
-        if "Ensemble_0" in params:
-            ens_params = jax.tree_util.tree_map(
-                lambda param: param[indx], params["Ensemble_0"]
-            )
-            params = params.copy(add_or_replace={"Ensemble_0": ens_params})
-        else:
-            params = jax.tree_util.tree_map(lambda param: param[indx], params)
-    return params
+def subsample_ensemble(networks, num_sample: int, num_qs: int, device='cpu'):
+    """Subsample ensemble networks for REDQ-style training"""
+    if num_sample is not None and num_sample < num_qs:
+        indices = torch.randperm(num_qs, device=device)[:num_sample]
+        # Return a subset of networks based on indices
+        return [networks[i] for i in indices]
+    return networks

@@ -8,6 +8,7 @@ def get_scheduler(
     optimizer: Optimizer,
     num_warmup_steps: Optional[int] = None,
     num_training_steps: Optional[int] = None,
+    num_cycles: Optional[int] = None,
     **kwargs
 ):
     """
@@ -42,5 +43,14 @@ def get_scheduler(
     # All other schedulers require `num_training_steps`
     if num_training_steps is None:
         raise ValueError(f"{name} requires `num_training_steps`, please provide that argument.")
+    
+    if name == SchedulerType.COSINE_WITH_RESTARTS:
+        return schedule_func(
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps,
+            num_cycles=num_cycles,
+            **kwargs
+        )
 
     return schedule_func(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps, **kwargs)
