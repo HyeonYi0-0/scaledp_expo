@@ -1,5 +1,15 @@
 # ScaleDP + EXPO
 
+# Install
+```bash
+# Download the robomimic dataset
+python download_robomimic_dataset.py \
+    --tasks square  \
+    --dataset_types ph \
+    --hdf5_types image \
+    --download_dir /path/to/robomimic_dataset
+```
+
 # Citation
 ```
 # ScaleDP
@@ -16,5 +26,13 @@
   author={Dong, Perry and Li, Qiyang and Sadigh, Dorsa and Finn, Chelsea},
   journal={arXiv preprint arXiv:2507.07986},
   year={2025}
+}
+
+# robomimic
+@inproceedings{robomimic2021,
+  title={What Matters in Learning from Offline Human Demonstrations for Robot Manipulation},
+  author={Mandlekar, Ajay and Xu, Danfei and Wong, Josiah and Nasiriany, Soroush and Wang, Chen and Kulkarni, Rohun and Fei-Fei, Li and Savarese, Silvio and Zhu, Yuke and Mart{\'\i}n-Mart{\'\i}n, Roberto},
+  booktitle={5th Annual Conference on Robot Learning},
+  year={2021}
 }
 ```
