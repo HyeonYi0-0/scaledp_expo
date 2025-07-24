@@ -39,16 +39,7 @@ from src.model.common.lr_scheduler import get_scheduler
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
-PLANET_ACTION_REPEAT = {
-    "cartpole-swingup-v0": 8,
-    "reacher-easy-v0": 4,
-    "cheetah-run-v0": 4,
-    "finger-spi-n-0": 2,
-    "ball_in_cup-catch-v0": 4,
-    "walker-walk-v0": 2,
-}
-
-class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
+class finetuneScaleDPWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
@@ -357,7 +348,7 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
     config_path=str(pathlib.Path(__file__).parent.parent.joinpath("config")), 
     config_name=pathlib.Path(__file__).stem)
 def main(cfg):
-    workspace = TrainDiffusionTransformerHybridWorkspace(cfg)
+    workspace = finetuneScaleDPWorkspace(cfg)
     workspace.run()
 
 if __name__ == "__main__":
