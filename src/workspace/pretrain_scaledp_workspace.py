@@ -261,6 +261,7 @@ class TrainScaleDPWorkspace(BaseWorkspace):
                     # sanitize metric names
                     metric_dict = dict()
                     for key, value in step_log.items():
+                        # print(key, value)
                         new_key = key.replace('/', '_')
                         metric_dict[new_key] = value
                     

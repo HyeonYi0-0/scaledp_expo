@@ -6,6 +6,9 @@ data
 data_local
 .vscode
 _wandb
+pretrain.sh
+memo.txt
+test/
 
 **/.DS_Store
 

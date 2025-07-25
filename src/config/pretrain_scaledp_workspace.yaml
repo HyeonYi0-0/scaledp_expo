@@ -4,7 +4,7 @@ defaults:
 
 name: train_robomimic_image
 _target_: src.workspace.pretrain_scaledp_workspace.TrainScaleDPWorkspace
-
+ 
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
 exp_name: "default"
@@ -22,7 +22,7 @@ obs_as_cond: True
 policy:
   _target_: src.policy.ScaleDP_hybrid_image_policy.ScaleDiffusionTransformerHybridImagePolicy
 
-  model_size: 'ScaleDP_S'       # ScaleDP model size -> 'ScaleDP_H', 'ScaleDP_L', 'ScaleDP_B', 'ScaleDP_S', 'ScaleDP_Ti'
+  model_size: 'ScaleDP_B'       # ScaleDP model size -> 'ScaleDP_H', 'ScaleDP_L', 'ScaleDP_B', 'ScaleDP_S', 'ScaleDP_Ti'
   shape_meta: ${shape_meta}
   crop_shape: [76,76]           # robomimic [76, 76], libero [200, 200]
 
@@ -57,31 +57,31 @@ ema:
   update_after_step: 0
 
 dataloader:
-  batch_size: 64
+  batch_size: 128
   num_workers: 8
   persistent_workers: false
   pin_memory: true
   shuffle: true
 
 val_dataloader:
-  batch_size: 64
+  batch_size: 128
   num_workers: 8
   persistent_workers: false
   pin_memory: true
   shuffle: false
 
 training:
-  checkpoint_every: 10        # Model checkpoint saving interval
-  debug: false
+  checkpoint_every: 20        # Model checkpoint saving interval
+  debug: False
   device: cuda:1
   gradient_accumulate_every: 1
   lr_scheduler: cosine        # "cosine", "cosine_with_restarts", "constant_with_warmup", "polynomial", "linear"
   lr_warmup_steps: 500
   max_train_steps: null
   max_val_steps: null
-  num_epochs: 700 # 3050     # Total number of training epochs
+  num_epochs: 500 # 3050     # Total number of training epochs
   resume: true
-  rollout_every: 10     # Evaluation rollout interval
+  rollout_every: 20     # Evaluation rollout interval
   sample_every: 5
   seed: ${seed}
   tqdm_interval_sec: 1.0
@@ -95,7 +95,7 @@ optimizer:
   betas: [0.9, 0.99]
 
 logging:
-  project: diffusion_policy_debug
+  project: pretrain_scaledp
   resume: True
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}

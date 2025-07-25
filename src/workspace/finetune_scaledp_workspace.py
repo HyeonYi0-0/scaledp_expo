@@ -30,7 +30,7 @@ from src.workspace.base_workspace import BaseWorkspace
 from src.policy.ScaleDP_hybrid_image_policy import ScaleDiffusionTransformerHybridImagePolicy
 from src.policy.EXPO import Expo
 from src.dataset.base_dataset import BaseImageDataset
-# from src.env_runner.base_image_runner import BaseImageRunner
+from src.env_runner.base_image_runner import BaseImageRunner
 from src.common.checkpoint_util import TopKCheckpointManager
 from src.common.json_logger import JsonLogger
 from src.common.pytorch_util import dict_apply, optimizer_to
@@ -67,6 +67,7 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
+        action_repeat = cfg.action_repeat
 
         # resume training
         if cfg.training.resume:
@@ -79,15 +80,9 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
         dataset: BaseImageDataset
         dataset = hydra.utils.instantiate(cfg.task.dataset)
         assert isinstance(dataset, BaseImageDataset)
-        # train_dataloader = DataLoader(dataset, **cfg.dataloader)
-        normalizer = dataset.get_normalizer()
         
-        # TODO: Initialize replay buffer with offline dataset
-
-        # # configure validation dataset
-        # val_dataset = dataset.get_validation_dataset()
-        # val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
-
+        # Set normalizer
+        normalizer = dataset.get_normalizer()
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
             self.ema_model.set_normalizer(normalizer)
@@ -97,9 +92,8 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
             cfg.training.lr_scheduler,
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
-            num_training_steps=(cfg.max_steps // action_repeat),
-            # pytorch assumes stepping LRScheduler every epoch
-            # however huggingface diffusers steps it every batch
+            num_training_steps=(cfg.train_max_steps // action_repeat),
+            num_cycles=cfg.training.num_cycles,
             last_epoch=self.global_step-1
         )
 
@@ -109,13 +103,28 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
             ema = hydra.utils.instantiate(
                 cfg.ema,
                 model=self.ema_model)
+            
+        # device transfer
+        device = torch.device(cfg.training.device)
+        self.model.to(device)
+        if self.ema_model is not None:
+            self.ema_model.to(device)
+        optimizer_to(self.optimizer, device)
+        
+        # save batch for sampling
+        train_sampling_batch = None
 
-        # configure env
-        # env_runner: BaseImageRunner
-        # env_runner = hydra.utils.instantiate(
-        #     cfg.task.env_runner,
-        #     output_dir=self.output_dir)
-        # assert isinstance(env_runner, BaseImageRunner)
+        # configure rollout evaluation env
+        env_runner: BaseImageRunner
+        env_runner = hydra.utils.instantiate(
+            cfg.task.env_runner,
+            output_dir=self.output_dir)
+        assert isinstance(env_runner, BaseImageRunner)
+
+        # configure Online RL env
+        env = env_runner.get_environment()
+        env = gym.wrappers.RecordEpisodeStatistics(env, deque_size=1)
+        env.seed(cfg.seed)
 
         # configure logging
         wandb_run = wandb.init(
@@ -128,39 +137,9 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                 "output_dir": self.output_dir,
             }
         )
-        
-        action_repeat = cfg.action_repeat or PLANET_ACTION_REPEAT.get(cfg.env_name, 2)
 
-        def wrap(env):
-            if "quadruped" in cfg.env_name:
-                camera_id = 2
-            else:
-                camera_id = 0
-            
-            return env, None
-            # return wrap_pixels(
-            #     env,
-            #     action_repeat=action_repeat,
-            #     image_size=cfg.image_size,
-            #     num_stack=cfg.num_stack,
-            #     camera_id=camera_id,
-            # )
-
-        env = gym.make(cfg.env_name)
-        # env, pixel_keys = wrap(env)
-        env = gym.wrappers.RecordEpisodeStatistics(env, deque_size=1)
-        if cfg.save_video:
-            # TODO: 
-            # env = WANDBVideo(env)
-            pass
-        env.seed(cfg.seed)
-
-        eval_env = gym.make(cfg.env_name)
-        eval_env, _ = wrap(eval_env)
-        eval_env.seed(cfg.seed + 42)
-
+        # configure Agent (Edit, on-the-fly)
         kwargs = dict(cfg.agent)
-        model_cls = kwargs.pop("model_cls")
         agent = Expo.create(
             cfg.seed,
             env.observation_space,
@@ -169,27 +148,17 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
             **kwargs,
         )
         
-        replay_buffer_size = cfg.replay_buffer_size or cfg.max_steps // action_repeat
-        if cfg.memory_efficient_replay_buffer:
-            replay_buffer = MemoryEfficientReplayBuffer(
-                env.observation_space, env.action_space, replay_buffer_size
-            )
-            replay_buffer_iterator = replay_buffer.get_iterator(
-                sample_args={
-                    "batch_size": cfg.batch_size * cfg.utd_ratio,
-                    "pack_obs_and_next_obs": True,
-                }
-            )
-        else:
-            replay_buffer = ReplayBuffer(
-                env.observation_space, env.action_space, replay_buffer_size
-            )
-            replay_buffer_iterator = replay_buffer.get_iterator(
-                sample_args={
-                    "batch_size": cfg.batch_size * cfg.utd_ratio,
-                }
-            )
-
+        # configure RL replay buffer
+        replay_buffer_size = cfg.replay_buffer_size or cfg.train_max_steps // action_repeat
+        replay_buffer = MemoryEfficientReplayBuffer(
+            env.observation_space, env.action_space, replay_buffer_size
+        )
+        replay_buffer_iterator = replay_buffer.get_iterator(
+            sample_args={
+                "batch_size": cfg.batch_size * cfg.utd_ratio,
+                "pack_obs_and_next_obs": True,
+            }
+        )
         replay_buffer.seed(cfg.seed)
 
         # configure checkpoint
@@ -198,25 +167,6 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
             **cfg.checkpoint.topk
         )
 
-        # device transfer
-        device = torch.device(cfg.training.device)
-        self.model.to(device)
-        if self.ema_model is not None:
-            self.ema_model.to(device)
-        optimizer_to(self.optimizer, device)
-        
-        # save batch for sampling
-        train_sampling_batch = None
-
-        if cfg.training.debug:
-            cfg.training.num_epochs = 2
-            cfg.training.max_train_steps = 3
-            cfg.training.max_val_steps = 3
-            cfg.training.rollout_every = 1
-            cfg.training.checkpoint_every = 1
-            cfg.training.val_every = 1
-            cfg.training.sample_every = 1
-
         # training loop
         observation, done = env.reset(), False
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
@@ -224,9 +174,8 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
             step_log = dict()
             train_losses = list()
             for i in tqdm.tqdm(
-                range(1, cfg.max_steps // action_repeat + 1),
+                range(1, cfg.train_max_steps // action_repeat + 1),
                 smoothing=0.1,
-                disable=not cfg.tqdm,
             ):
                 if i < cfg.start_training:
                     action = env.action_space.sample()
@@ -234,10 +183,7 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                     action, agent = agent.sample_actions(observation)
                 next_observation, reward, done, info = env.step(action)
 
-                if not done or "TimeLimit.truncated" in info:
-                    mask = 1.0
-                else:
-                    mask = 0.0
+                mask = 1.0 if not done or "TimeLimit.truncated" in info else 0.0
 
                 replay_buffer.insert(
                     dict(
@@ -253,17 +199,17 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
 
                 if done:
                     observation, done = env.reset(), False
+                    # TODO: Check Validation
                     for k, v in info["episode"].items():
                         decode = {"r": "return", "l": "length", "t": "time"}
-                        wandb.log({f"training/{decode[k]}": v}, step=i * action_repeat)
+                        wandb.log({f"agent/{decode[k]}": v}, step=i * action_repeat)
 
                 if i >= cfg.start_training:
                     batch = next(replay_buffer_iterator)
                     agent, update_info, mini_batch = agent.update(batch, cfg.utd_ratio)
                     
+                    # Base policy update (finetuning)
                     batch = dict_apply(mini_batch, lambda x: x.to(device, non_blocking=True))
-                    if train_sampling_batch is None:
-                        train_sampling_batch = batch
 
                     # compute loss
                     raw_loss = self.model.compute_loss(batch)
@@ -284,64 +230,72 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                     raw_loss_cpu = raw_loss.item()
                     train_losses.append(raw_loss_cpu)
                     step_log = {
-                        'train_loss': raw_loss_cpu,
-                        'global_step': self.global_step,
-                        'epoch': self.epoch,
-                        'lr': lr_scheduler.get_last_lr()[0]
+                        'base/train_loss': raw_loss_cpu,
+                        'base/lr': lr_scheduler.get_last_lr()[0]
                     }
+
+                    # ============ evaluate Base policy =============
+                    policy = self.model
+                    if cfg.training.use_ema:
+                        policy = self.ema_model
+                    policy.eval()
+
+                    if (i % cfg.training.rollout_every) == 0:   
+                        runner_log = env_runner.run(policy)
+                        # log all
+                        step_log.update(runner_log)
+                    
+                    # checkpoint
+                    if (i % cfg.training.checkpoint_every) == 0:
+                        # checkpointing
+                        if cfg.checkpoint.save_last_ckpt:
+                            self.save_checkpoint()
+                        if cfg.checkpoint.save_last_snapshot:
+                            self.save_snapshot()
+
+                        # sanitize metric names
+                        metric_dict = dict()
+                        for key, value in step_log.items():
+                            new_key = key.replace('/', '_')
+                            metric_dict[new_key] = value
+                        
+                        topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
+
+                        if topk_ckpt_path is not None:
+                            self.save_checkpoint(path=topk_ckpt_path)
+
+                        agent_ckpt_dir = os.path.join(os.path.dirname(topk_ckpt_path), "agent")
+
+                        if not os.path.exists(agent_ckpt_dir):
+                            os.makedirs(agent_ckpt_dir, exist_ok=True)
+                        
+                        file_name = os.path.basename(topk_ckpt_path)
+                        name, _ = os.path.splitext(file_name)
+                        agent_ckpt_path = os.path.join(agent_ckpt_dir, f"{name}.pt")
+                        if not os.path.isfile(agent_ckpt_path): 
+                            torch.save({
+                                'agent_state_dict': agent.state_dict() if hasattr(agent, 'state_dict') else agent,
+                                'step': i * action_repeat,
+                                'optimizer_state_dict': getattr(agent, 'optimizer', {}).state_dict() if hasattr(getattr(agent, 'optimizer', {}), 'state_dict') else {}
+                            }, agent_ckpt_path)
+
+                    # ============ train Base policy =============
+                    policy.train()
 
                     if i % cfg.log_interval == 0:
                         # replace train_loss with log_interval average
                         train_loss = np.mean(train_losses)
-                        step_log['train_loss'] = train_loss
+                        step_log['base/train_loss'] = train_loss
+
+                        # agent logging
                         for k, v in update_info.items():
-                            wandb.log({f"training/{k}": v}, step=i * action_repeat)
+                            step_log[f"agent/{k}"] = v
                         
                         step_log = dict()
                         train_losses = list()
 
-                if i % cfg.eval_interval == 0:   
-                    # TODO:                  
-                    # eval_info = evaluate(
-                    #     agent,
-                    #     eval_env,
-                    #     num_episodes=cfg.eval_episodes,
-                    #     save_video=cfg.save_video,
-                    # )
-                    # for k, v in eval_info.items():
-                    #     wandb.log({f"evaluation/{k}": v}, step=i * action_repeat)
-
-                    if cfg.save_dir is not None:
-                        checkpoint_path = os.path.join(cfg.save_dir, f"checkpoint_{i * action_repeat}.pt")
-                        torch.save({
-                            'agent_state_dict': agent.state_dict() if hasattr(agent, 'state_dict') else agent,
-                            'step': i * action_repeat,
-                            'optimizer_state_dict': getattr(agent, 'optimizer', {}).state_dict() if hasattr(getattr(agent, 'optimizer', {}), 'state_dict') else {}
-                        }, checkpoint_path)
-                
-                # checkpoint
-                if (self.epoch % cfg.training.checkpoint_every) == 0:
-                    # checkpointing
-                    if cfg.checkpoint.save_last_ckpt:
-                        self.save_checkpoint()
-                    if cfg.checkpoint.save_last_snapshot:
-                        self.save_snapshot()
-
-                    # sanitize metric names
-                    metric_dict = dict()
-                    for key, value in step_log.items():
-                        new_key = key.replace('/', '_')
-                        metric_dict[new_key] = value
-                    
-                    topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
-
-                    if topk_ckpt_path is not None:
-                        self.save_checkpoint(path=topk_ckpt_path)
-
-                wandb_run.log(step_log, step=self.global_step)
-                json_logger.log(step_log)
-                self.global_step += 1
-                self.epoch += 1
+                        wandb_run.log(step_log, step=(i*action_repeat))
+                        json_logger.log(step_log)
 
 @hydra.main(
     version_base=None,

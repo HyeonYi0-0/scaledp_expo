@@ -121,18 +121,25 @@ class RobomimicImageWrapper(gym.Env):
 def test():
     import os
     from omegaconf import OmegaConf
-    cfg_path = os.path.expanduser('~/dev/diffusion_policy/diffusion_policy/config/task/lift_image.yaml')
+    import collections
+    cfg_path = os.path.expanduser('/data_8tb/sanhak2025/scaledp_expo/src/config/task/square_image.yaml')
     cfg = OmegaConf.load(cfg_path)
     shape_meta = cfg['shape_meta']
 
 
     import robomimic.utils.file_utils as FileUtils
     import robomimic.utils.env_utils as EnvUtils
+    import robomimic.utils.obs_utils as ObsUtils
     from matplotlib import pyplot as plt
 
-    dataset_path = os.path.expanduser('~/dev/diffusion_policy/data/robomimic/datasets/square/ph/image.hdf5')
+    dataset_path = os.path.expanduser('/data_8tb/sanhak2025/scaledp_expo/data/robomimic/square_ph_image.hdf5')
     env_meta = FileUtils.get_env_metadata_from_dataset(
         dataset_path)
+
+    modality_mapping = collections.defaultdict(list)
+    for key, attr in shape_meta['obs'].items():
+        modality_mapping[attr.get('type', 'low_dim')].append(key)
+    ObsUtils.initialize_obs_modality_mapping_from_dict(modality_mapping)
 
     env = EnvUtils.create_env_from_metadata(
         env_meta=env_meta,
@@ -146,9 +153,20 @@ def test():
         shape_meta=shape_meta
     )
     wrapper.seed(0)
+
     obs = wrapper.reset()
+    for i in range(100):
+        print(wrapper.action_space.sample())
+        obs, reward, done, info = wrapper.step(wrapper.action_space.sample())
+        for k, v in obs.items():
+            print(f"{k}: {v.shape}")
+        print("reward: ", reward)
+        print("done: ", done)
+        print("info: ", info)
+        break
+
     img = wrapper.render()
-    plt.imshow(img)
+    plt.imsave('image_output.png', img)
 
 
     # states = list()

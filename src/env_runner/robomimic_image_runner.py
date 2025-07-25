@@ -23,7 +23,6 @@ import robomimic.utils.file_utils as FileUtils
 import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.obs_utils as ObsUtils
 
-
 def create_env(env_meta, shape_meta, enable_render=True):
     modality_mapping = collections.defaultdict(list)
     for key, attr in shape_meta['obs'].items():
@@ -219,6 +218,7 @@ class RobomimicImageRunner(BaseImageRunner):
         # env = SyncVectorEnv(env_fns)
 
 
+        self.shape_meta = shape_meta
         self.env_meta = env_meta
         self.env = env
         self.env_fns = env_fns
@@ -373,3 +373,28 @@ class RobomimicImageRunner(BaseImageRunner):
             uaction = uaction.reshape(*raw_shape[:-1], 14)
 
         return uaction
+
+    def get_environment(self):
+        modality_mapping = collections.defaultdict(list)
+        for key, attr in self.shape_meta['obs'].items():
+            modality_mapping[attr.get('type', 'low_dim')].append(key)
+        ObsUtils.initialize_obs_modality_mapping_from_dict(modality_mapping)
+
+        env = EnvUtils.create_env_from_metadata(
+            env_meta=self.env_meta,
+            render=False, 
+            render_offscreen=False,
+            use_image_obs=True, 
+        )
+
+        robomimic_image_wrapper = RobomimicImageWrapper(
+            env=env,
+            shape_meta=self.shape_meta
+        )
+
+        return MultiStepWrapper(
+            robomimic_image_wrapper,
+            n_obs_steps=self.n_obs_steps,
+            n_action_steps=self.n_action_steps,
+            max_episode_steps=self.max_steps
+        )

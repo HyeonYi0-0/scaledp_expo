@@ -21,7 +21,8 @@ shape_meta: &shape_meta
 
 task_name: &task_name square
 dataset_type: &dataset_type ph
-dataset_path: &dataset_path data/robomimic/datasets/${task.task_name}/${task.dataset_type}/image.hdf5
+dataset_path: &dataset_path data/robomimic/${task.task_name}_${task.dataset_type}_image.hdf5
+# dataset_path: &dataset_path data/robomimic/square_ph_image.hdf5
 abs_action: &abs_action False
 
 env_runner:
@@ -29,14 +30,15 @@ env_runner:
   dataset_path: *dataset_path
   shape_meta: *shape_meta
   # costs 1GB per env
-  n_train: 6
-  n_train_vis: 2
+  n_train: 3
+  n_train_vis: 1
   train_start_idx: 0
-  n_test: 50
-  n_test_vis: 4
+  n_test: 25
+  n_test_vis: 1
   test_start_seed: 100000
   # use python's eval function as resolver, single-quoted string as argument
   max_steps: ${eval:'500 if "${task.dataset_type}" == "mh" else 400'}
+  # max_steps: 400
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
   render_obs_key: 'agentview_image'

@@ -48,7 +48,9 @@ import argparse
 
 import robomimic
 import robomimic.utils.file_utils as FileUtils
-from robomimic import DATASET_REGISTRY, HF_REPO_ID
+from robomimic import DATASET_REGISTRY
+
+HF_REPO_ID = "amandlek/robomimic"
 
 ALL_TASKS = ["lift", "can", "square", "transport", "tool_hang", "lift_real", "can_real", "tool_hang_real"]
 ALL_DATASET_TYPES = ["ph", "mh", "mg", "paired"]
