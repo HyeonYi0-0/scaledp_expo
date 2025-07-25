@@ -1,10 +1,11 @@
 import copy
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, Optional, Tuple, Any
 
 import gym
 import numpy as np
 from flax.core import frozen_dict
 from gym.spaces import Box
+from tqdm import tqdm
 
 from src.dataset.mdp_dataset import DatasetDict, _sample
 from src.dataset.replay_buffer import ReplayBuffer
@@ -161,3 +162,59 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
                     batch["next_observations"][pixel_key] = obs_pixels[..., 1:]
 
         return frozen_dict.freeze(batch)
+
+def init_replay_buffer_from_demo_data(
+    demo_data: Any,
+    replay_buffer: Any,
+    pixel_keys: Tuple[str, ...] = ("pixels",),
+) -> "MemoryEfficientReplayBuffer":
+    # Load zarr dataset
+    root = demo_data
+    data = root["/data"]
+    meta = root["/meta"]
+    episode_ends = meta["episode_ends"][:]
+
+    # Parse episode boundaries
+    start_idx = 0
+    for end_idx in tqdm(episode_ends, desc="Processing episodes"):
+        for t in range(start_idx, end_idx-1):  # skip last index (no next_obs)
+            obs = {
+                "robot0_eef_pos": data["robot0_eef_pos"][t],
+                "robot0_eef_quat": data["robot0_eef_quat"][t],
+                "robot0_gripper_qpos": data["robot0_gripper_qpos"][t],
+            }
+            next_obs = {
+                "robot0_eef_pos": data["robot0_eef_pos"][t + 1],
+                "robot0_eef_quat": data["robot0_eef_quat"][t + 1],
+                "robot0_gripper_qpos": data["robot0_gripper_qpos"][t + 1],
+            }
+
+            for key in pixel_keys:
+                obs[key] = data[key][t]
+                next_obs[key] = data[key][t + 1]
+
+            action = data["action"][t]
+            if t == (end_idx-2) :
+                reward = 1.0
+                done = True
+                mask = 0.0
+            else :
+                reward = 0.0
+                done = False
+                mask = 1.0 
+
+            # Insert into buffer
+            replay_buffer.insert(
+                dict(
+                    observations=obs,
+                    actions=action,
+                    rewards=reward,
+                    masks=mask,
+                    dones=done,
+                    next_observations=next_obs,
+                )
+            )
+
+        start_idx = end_idx
+
+    return replay_buffer

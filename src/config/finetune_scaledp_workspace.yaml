@@ -4,33 +4,25 @@ defaults:
 
 # Project settings
 project_name: "pytorch_online_pixels"
-env_name: "cheetah-run-v0"
-seed: 42
+seed: 0
 
 # Evaluation settings
-eval_episodes: 10
 log_interval: 1000
 eval_interval: 5000
 
 # Training settings
 batch_size: 256
-max_steps: 500000  # 5e5
+global_max_steps: 500000  # 5e5
 start_training: 1000  # 1e3
 
 # Environment settings
-image_size: 64
-num_stack: 3
-replay_buffer_size: null  # Will use max_steps // action_repeat if null
-action_repeat: null  # Will use PLANET defaults if null
-
-# UI and logging
-tqdm: true
-save_video: false
-save_dir: null
+image_size: 84
+num_stack: 2
+replay_buffer_size: null  # Will use global_max_steps // action_repeat if null
+action_repeat: 1  # Will use PLANET defaults if null
 
 # Buffer settings
-memory_efficient_replay_buffer: true
-utd_ratio: 1
+utd_ratio: 20
 
 # Agent configuration
 agent:
@@ -51,20 +43,20 @@ agent:
 # Training configuration
 training:
   seed: 42
-  device: "cpu"  # or "cuda"
-  use_ema: false
+  device: "cuda:3"  # or "cuda"
+  use_ema: True
   lr_scheduler: "cosine"
   lr_warmup_steps: 1000
   gradient_accumulate_every: 1
-  debug: false
-  resume: false
-  num_epochs: 1000
+  # debug: false
+  resume: True
+  # num_epochs: 1000
   max_train_steps: 10000
   max_val_steps: 1000
   rollout_every: 100
   checkpoint_every: 1000
-  val_every: 100
-  sample_every: 100
+  # val_every: 100
+  # sample_every: 100
 
 # Checkpointing
 checkpoint:

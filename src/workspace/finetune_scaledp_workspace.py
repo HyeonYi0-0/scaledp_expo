@@ -3,7 +3,7 @@ import dmcgym
 import gym
 import tqdm
 
-from src.dataset import MemoryEfficientReplayBuffer, ReplayBuffer
+from src.dataset import MemoryEfficientReplayBuffer, init_replay_buffer_from_demo_data
 
 if __name__ == "__main__":
     import sys
@@ -61,10 +61,6 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
         # configure training state
         self.optimizer = self.model.get_optimizer(**cfg.optimizer)
 
-        # configure training state
-        self.global_step = 0
-        self.epoch = 0
-
     def run(self):
         cfg = copy.deepcopy(self.cfg)
         action_repeat = cfg.action_repeat
@@ -80,6 +76,25 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
         dataset: BaseImageDataset
         dataset = hydra.utils.instantiate(cfg.task.dataset)
         assert isinstance(dataset, BaseImageDataset)
+
+        # configure RL replay buffer
+        replay_buffer_size = cfg.replay_buffer_size or cfg.global_max_steps // action_repeat
+        replay_buffer = MemoryEfficientReplayBuffer(
+            env.observation_space, env.action_space, replay_buffer_size
+        )
+        replay_buffer_iterator = replay_buffer.get_iterator(
+            sample_args={
+                "batch_size": cfg.batch_size * cfg.utd_ratio,
+                "pack_obs_and_next_obs": True,
+            }
+        )
+        replay_buffer.seed(cfg.seed)
+
+        replay_buffer = init_replay_buffer_from_demo_data(
+            demo_data=dataset.replay_buffer, 
+            replay_buffer=replay_buffer, 
+            pixel_keys=("agentview_image", "robot0_eye_in_hand_image")
+        )
         
         # Set normalizer
         normalizer = dataset.get_normalizer()
@@ -92,9 +107,9 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
             cfg.training.lr_scheduler,
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
-            num_training_steps=(cfg.train_max_steps // action_repeat),
+            num_training_steps=(cfg.global_max_steps // action_repeat),
             num_cycles=cfg.training.num_cycles,
-            last_epoch=self.global_step-1
+            last_epoch=-1
         )
 
         # configure ema
@@ -110,9 +125,6 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
         if self.ema_model is not None:
             self.ema_model.to(device)
         optimizer_to(self.optimizer, device)
-        
-        # save batch for sampling
-        train_sampling_batch = None
 
         # configure rollout evaluation env
         env_runner: BaseImageRunner
@@ -144,22 +156,9 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
             cfg.seed,
             env.observation_space,
             env.action_space,
-            # pixel_keys=pixel_keys,
+            pixel_keys=("agentview_image", "robot0_eye_in_hand_image"),
             **kwargs,
         )
-        
-        # configure RL replay buffer
-        replay_buffer_size = cfg.replay_buffer_size or cfg.train_max_steps // action_repeat
-        replay_buffer = MemoryEfficientReplayBuffer(
-            env.observation_space, env.action_space, replay_buffer_size
-        )
-        replay_buffer_iterator = replay_buffer.get_iterator(
-            sample_args={
-                "batch_size": cfg.batch_size * cfg.utd_ratio,
-                "pack_obs_and_next_obs": True,
-            }
-        )
-        replay_buffer.seed(cfg.seed)
 
         # configure checkpoint
         topk_manager = TopKCheckpointManager(
@@ -174,7 +173,7 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
             step_log = dict()
             train_losses = list()
             for i in tqdm.tqdm(
-                range(1, cfg.train_max_steps // action_repeat + 1),
+                range(1, cfg.global_max_steps // action_repeat + 1),
                 smoothing=0.1,
             ):
                 if i < cfg.start_training:
@@ -217,7 +216,7 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                     loss.backward()
 
                     # step optimizer
-                    if self.global_step % cfg.training.gradient_accumulate_every == 0:
+                    if i % cfg.training.gradient_accumulate_every == 0:
                         self.optimizer.step()
                         self.optimizer.zero_grad()
                         lr_scheduler.step()
