@@ -1,9 +1,8 @@
 import copy
-from typing import Iterable, Optional, Tuple, Any
+from typing import Iterable, Optional, Tuple, Any, Dict
 
 import gym
 import numpy as np
-from flax.core import frozen_dict
 from gym.spaces import Box
 from tqdm import tqdm
 
@@ -96,7 +95,7 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
         keys: Optional[Iterable[str]] = None,
         indx: Optional[np.ndarray] = None,
         pack_obs_and_next_obs: bool = False,
-    ) -> frozen_dict.FrozenDict:
+    ) -> Dict[str, Any]:
         """Samples from the replay buffer.
 
         Args:
@@ -134,7 +133,7 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
         keys.remove("observations")
 
         batch = super().sample(batch_size, keys, indx)
-        batch = batch.unfreeze()
+        batch = dict(batch)  # Convert to mutable dict
 
         obs_keys = self.dataset_dict["observations"].keys()
         obs_keys = list(obs_keys)
@@ -161,7 +160,7 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
                 if "next_observations" in keys:
                     batch["next_observations"][pixel_key] = obs_pixels[..., 1:]
 
-        return frozen_dict.freeze(batch)
+        return batch
 
 def init_replay_buffer_from_demo_data(
     demo_data: Any,

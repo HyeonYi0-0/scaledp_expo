@@ -2,10 +2,7 @@ from functools import partial
 from random import sample
 from typing import Dict, Iterable, Optional, Tuple, Union
 
-import jax
-import jax.numpy as jnp
 import numpy as np
-from flax.core import frozen_dict
 from gym.utils import seeding
 
 DataType = Union[np.ndarray, Dict[str, "DataType"]]
@@ -83,7 +80,7 @@ class Dataset(object):
         batch_size: int,
         keys: Optional[Iterable[str]] = None,
         indx: Optional[np.ndarray] = None,
-    ) -> frozen_dict.FrozenDict:
+    ) -> Dict[str, Union[np.ndarray, Dict]]:
         if indx is None:
             if hasattr(self.np_random, "integers"):
                 indx = self.np_random.integers(len(self), size=batch_size)
@@ -101,32 +98,7 @@ class Dataset(object):
             else:
                 batch[k] = self.dataset_dict[k][indx]
 
-        return frozen_dict.freeze(batch)
-
-    def sample_jax(self, batch_size: int, keys: Optional[Iterable[str]] = None):
-        if not hasattr(self, "rng"):
-            self.rng = jax.random.PRNGKey(self._seed or 42)
-
-            if keys is None:
-                keys = self.dataset_dict.keys()
-
-            jax_dataset_dict = {k: self.dataset_dict[k] for k in keys}
-            jax_dataset_dict = jax.device_put(jax_dataset_dict)
-
-            @jax.jit
-            def _sample_jax(rng):
-                key, rng = jax.random.split(rng)
-                indx = jax.random.randint(
-                    key, (batch_size,), minval=0, maxval=len(self)
-                )
-                return rng, jax.tree_map(
-                    lambda d: jnp.take(d, indx, axis=0), jax_dataset_dict
-                )
-
-            self._sample_jax = _sample_jax
-
-        self.rng, sample = self._sample_jax(self.rng)
-        return sample
+        return batch
 
     def split(self, ratio: float) -> Tuple["Dataset", "Dataset"]:
         assert 0 < ratio and ratio < 1
