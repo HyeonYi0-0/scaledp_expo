@@ -1,28 +1,75 @@
 # Configuration for ScaleDP Finetuning Workspace
 defaults:
   - _self_
+  - task: square_image
 
 # Project settings
-project_name: "pytorch_online_pixels"
-seed: 0
+project_name: "finetune_robomimic_image"
+_target_: src.workspace.pretrain_scaledp_workspace.TrainScaleDPWorkspace
 
-# Evaluation settings
+task_name: ${task.name}
+shape_meta: ${task.shape_meta}
+exp_name: "default"
+
+horizon: 8
+n_obs_steps: 1
+n_action_steps: 1
+seed: 0
+n_latency_steps: 0
+dataset_obs_steps: 1
+past_action_visible: False
+keypoint_visible_rate: 1.0
+obs_as_cond: True
+
+policy:
+  _target_: src.policy.ScaleDP_hybrid_image_policy.ScaleDiffusionTransformerHybridImagePolicy
+
+  model_size: 'ScaleDP_B'       # ScaleDP model size -> 'ScaleDP_H', 'ScaleDP_L', 'ScaleDP_B', 'ScaleDP_S', 'ScaleDP_Ti'
+  shape_meta: ${shape_meta}
+  crop_shape: [76,76]           # robomimic [76, 76], libero [200, 200]
+
+  # oc.select resolver: key, default
+  task_name: ${oc.select:task.task_name,square}
+  dataset_type: ${oc.select:task.dataset_type,ph}
+
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+    beta_end: 0.02
+    beta_schedule: squaredcos_cap_v2 
+    beta_start: 0.0001
+    clip_sample: true
+    num_train_timesteps: 100
+    prediction_type: epsilon
+    # variance_type: fixed_small
+
+  horizon: ${horizon}
+  n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
+  n_obs_steps: ${n_obs_steps}
+  num_inference_steps: 100
+  obs_encoder_group_norm: True
+  eval_fixed_crop: True
+  obs_as_cond: ${obs_as_cond}
+
+ema:
+  _target_: src.model.diffusion.ema_model.EMAModel
+  inv_gamma: 1.0
+  max_value: 0.9999
+  min_value: 0.0
+  power: 0.75
+  update_after_step: 0
+
+# log settings
 log_interval: 1000
-eval_interval: 5000
 
 # Training settings
+utd_ratio: 20
 batch_size: 256
-global_max_steps: 500000  # 5e5
-start_training: 1000  # 1e3
+global_max_steps: 5000000  # 5e5
+start_training: ${batch_size}*${utd_ratio}  # 1e3
 
 # Environment settings
-image_size: 84
-num_stack: 2
 replay_buffer_size: null  # Will use global_max_steps // action_repeat if null
 action_repeat: 1  # Will use PLANET defaults if null
-
-# Buffer settings
-utd_ratio: 20
 
 # Agent configuration
 agent:
@@ -32,8 +79,8 @@ agent:
   hidden_dims: [256, 256, 256]
   discount: 0.99
   tau: 0.005
-  num_qs: 2
-  num_min_qs: null
+  num_qs: 10
+  num_min_qs: 2
   critic_dropout_rate: null
   critic_layer_norm: false
   target_entropy: null
@@ -50,67 +97,41 @@ training:
   gradient_accumulate_every: 1
   # debug: false
   resume: True
-  # num_epochs: 1000
-  max_train_steps: 10000
-  max_val_steps: 1000
-  rollout_every: 100
-  checkpoint_every: 1000
-  # val_every: 100
-  # sample_every: 100
+  rollout_every: 4000       # 단위: step
+  checkpoint_every: 4000    # 단위: step
 
 # Checkpointing
 checkpoint:
-  save_last_ckpt: true
-  save_last_snapshot: true
   topk:
-    metric_key: "train_loss"
-    mode: "min"
+    monitor_key: test_mean_score
+    mode: max
     k: 5
-    format_str: "epoch_{epoch:04d}_loss_{train_loss:.4f}.ckpt"
+    format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
 
 # Logging configuration
 logging:
-  project: "scaledp_expo"
-  entity: null
-  name: null
-  tags: []
-  notes: ""
-  mode: "online"  # or "offline", "disabled"
+  project: "finetune_scaledp_expo"
+  resume: True
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "${exp_name}"]
+  id: null
+  group: null
 
 # Optimizer configuration
 optimizer:
-  _target_: "torch.optim.AdamW"
-  lr: 1e-4
-  weight_decay: 1e-2
+  transformer_weight_decay: 1.0e-1
+  obs_encoder_weight_decay: 1.0e-6
+  learning_rate: 1.0e-4
+  betas: [0.9, 0.99]
 
-# EMA configuration (if use_ema is true)
-ema:
-  _target_: "src.model.diffusion.ema_model.EMAModel"
-  decay: 0.995
-  update_every: 10
-
-# Task configuration
-task:
-  dataset:
-    _target_: "src.dataset.base_dataset.BaseImageDataset"
-    # Add dataset-specific parameters here
-
-# Policy configuration (ScaleDP model)
-policy:
-  _target_: "src.policy.ScaleDP_hybrid_image_policy.ScaleDiffusionTransformerHybridImagePolicy"
-  # Add policy-specific parameters here
-
-# DataLoader configuration
-dataloader:
-  batch_size: 256
-  shuffle: true
-  num_workers: 4
-  pin_memory: true
-  drop_last: true
-
-val_dataloader:
-  batch_size: 256
-  shuffle: false
-  num_workers: 4
-  pin_memory: true
-  drop_last: false
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  sweep:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    subdir: ${hydra.job.num}
