@@ -152,11 +152,10 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
 
         # configure Agent (Edit, on-the-fly)
         kwargs = dict(cfg.agent)
-        agent = Expo.create(
+        agent = Expo.create_pixels(
             cfg.seed,
             env.observation_space,
             env.action_space,
-            pixel_keys=("agentview_image", "robot0_eye_in_hand_image"),
             **kwargs,
         )
 
