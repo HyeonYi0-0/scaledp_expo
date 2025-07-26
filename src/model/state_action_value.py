@@ -8,7 +8,7 @@ class StateActionValue(nn.Module):
     def __init__(self, base_cls, input_dim, **kwargs):
         super().__init__()
         # Extract hidden_dims from kwargs to avoid duplication
-        hidden_dims = kwargs.pop('hidden_dims', [256, 256])
+        hidden_dims = kwargs.pop('hidden_dims', [256, 256, 256])
         
         # Create the base network with proper input dimension
         self.base_network = base_cls(hidden_dims=[input_dim] + list(hidden_dims), **kwargs)

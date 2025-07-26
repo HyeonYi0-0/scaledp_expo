@@ -180,9 +180,8 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                 else:
                     policy = self.model if cfg.training.use_ema else self.ema_model
                     policy.eval()
-                    action, agent = agent.on_the_fly(base_policy=policy,
-                                                     observation=observation,
-                                                     n_samples=cfg.agent.n_samples)
+                    action, agent, _ = agent.on_the_fly(base_policy=policy,
+                                                     observation=observation)
                     policy.train()
                 next_observation, reward, done, info = env.step(action)
 
@@ -209,7 +208,10 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
 
                 if i >= cfg.start_training:
                     batch = next(replay_buffer_iterator)
-                    agent, update_info, mini_batch = agent.update(batch, cfg.utd_ratio)
+                    policy = self.model if cfg.training.use_ema else self.ema_model
+                    policy.eval()
+                    agent, update_info, mini_batch = agent.update(policy, batch, cfg.utd_ratio)
+                    policy.train()
                     
                     # Base policy update (finetuning)
                     batch = dict_apply(mini_batch, lambda x: x.to(device, non_blocking=True))
