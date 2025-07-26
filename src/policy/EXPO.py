@@ -379,6 +379,43 @@ class Expo(Agent):
                   num_min_qs=num_min_qs,
                   backup_entropy=backup_entropy,
                   device=device)
+        
+    def on_the_fly(self, base_policy, obs, n_samples):
+        # extract actions
+        actions = []
+        for _ in range(n_samples):
+            # from base policy
+            np_obs_dict = dict(obs)
+            obs_dict = dict_apply(np_obs_dict, lambda x: torch.from_numpy(x).to(device=self.device))
+            with torch.no_grad():
+                action_dict = base_policy.predict_action(obs_dict)
+            np_action_dict = dict_apply(action_dict, lambda x: x.detach().to('cpu').numpy())
+            action = np_action_dict['action']
+            actions.append(action)
+            
+            # from actor
+            obs_tensor = torch.from_numpy(obs).float().to(self.device)
+            if obs_tensor.dim() == 1:
+                obs_tensor = obs_tensor.unsqueeze(0)
+            action = _sample_actions(self.actor, obs_tensor)
+            actions.append(action.cpu().numpy())
+            
+        assert len(actions) == n_samples * 2, f"Expected {n_samples * 2} actions, got {len(actions)}"
+        # select one action based on the highest Q-value
+        actions = np.stack(actions, axis=0)
+        obs_tensor = torch.from_numpy(obs).float().to(self.device)
+        if obs_tensor.dim() == 1:
+            obs_tensor = obs_tensor.unsqueeze(0)
+        encoded_obs = self.obs_encoder(obs_tensor)
+        q_values = []
+        for critic_net in self.critic:
+            q_val = critic_net(encoded_obs, actions)
+            q_values.append(q_val)
+        q_values = torch.stack(q_values, dim=0).mean(dim=0)
+        best_action_idx = q_values.argmax().item()
+        best_action = actions[best_action_idx]
+        
+        return best_action, self
 
     def update_actor(self, batch: DatasetDict) -> Tuple['Expo', Dict[str, float]]:
         observations = torch.from_numpy(batch["observations"]).float().to(self.device)

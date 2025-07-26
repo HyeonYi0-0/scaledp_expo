@@ -178,7 +178,12 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                 if i < cfg.start_training:
                     action = env.action_space.sample()
                 else:
-                    action, agent = agent.sample_actions(observation)
+                    policy = self.model if cfg.training.use_ema else self.ema_model
+                    policy.eval()
+                    action, agent = agent.on_the_fly(base_policy=policy,
+                                                     observation=observation,
+                                                     n_samples=cfg.agent.n_samples)
+                    policy.train()
                 next_observation, reward, done, info = env.step(action)
 
                 mask = 1.0 if not done or "TimeLimit.truncated" in info else 0.0
