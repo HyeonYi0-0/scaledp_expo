@@ -323,6 +323,7 @@ class RobomimicImageRunner(BaseImageRunner):
         
         # log
         max_rewards = collections.defaultdict(list)
+        episode_rewards = collections.defaultdict(list)
         log_data = dict()
         # results reported in the paper are generated using the commented out line below
         # which will only report and average metrics from first n_envs initial condition and seeds
@@ -336,6 +337,8 @@ class RobomimicImageRunner(BaseImageRunner):
             seed = self.env_seeds[i]
             prefix = self.env_prefixs[i]
             max_reward = np.max(all_rewards[i])
+            # Compute normalized return using Z-score
+            episode_rewards[prefix].extend(all_rewards[i])
             max_rewards[prefix].append(max_reward)
             log_data[prefix+f'sim_max_reward_{seed}'] = max_reward
 
@@ -350,6 +353,16 @@ class RobomimicImageRunner(BaseImageRunner):
             name = prefix+'mean_score'
             value = np.mean(value)
             log_data[name] = value
+
+        for prefix, value in episode_rewards.items():
+            name = prefix+'normalized_return'
+            mean_reward = np.mean(value)
+            std_reward = np.std(value)  
+            if std_reward == 0:
+                z_score = 0.0
+            else:
+                z_score = (np.sum(value) - mean_reward * len(value)) / (std_reward * len(value))
+            log_data[name] = z_score
 
         return log_data
 

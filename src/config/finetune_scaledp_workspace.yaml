@@ -64,7 +64,7 @@ log_interval: 1000
 # Training settings
 utd_ratio: 20
 batch_size: 256
-global_max_steps: 5000000  # 5e5
+global_max_steps: 500000  # 5e5
 start_training: ${batch_size}*${utd_ratio}  # 1e3
 
 # Environment settings

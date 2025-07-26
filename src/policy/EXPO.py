@@ -401,6 +401,7 @@ class Expo(Agent):
             actions.append(action.cpu().numpy())
             
         assert len(actions) == n_samples * 2, f"Expected {n_samples * 2} actions, got {len(actions)}"
+        
         # select one action based on the highest Q-value
         actions = np.stack(actions, axis=0)
         obs_tensor = torch.from_numpy(obs).float().to(self.device)
