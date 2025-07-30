@@ -25,12 +25,13 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
         for pixel_key in self.pixel_keys:
             pixel_obs_space = observation_space.spaces[pixel_key]
             if self._num_stack is None:
-                self._num_stack = pixel_obs_space.shape[-1]
+                self._num_stack = pixel_obs_space.shape[1]
+                print(f"Number of stacked frames for {pixel_key}: {self._num_stack}")
             else:
-                assert self._num_stack == pixel_obs_space.shape[-1]
+                assert self._num_stack == pixel_obs_space.shape[1]
             self._unstacked_dim_size = pixel_obs_space.shape[-2]
-            low = pixel_obs_space.low[..., 0]
-            high = pixel_obs_space.high[..., 0]
+            low = pixel_obs_space.low[..., 0, :, :]
+            high = pixel_obs_space.high[..., 0, :, :]
             unstacked_pixel_obs_space = Box(
                 low=low, high=high, dtype=pixel_obs_space.dtype
             )
@@ -60,8 +61,17 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
                 super().insert(element)
 
         data_dict = data_dict.copy()
+        
         data_dict["observations"] = data_dict["observations"].copy()
         data_dict["next_observations"] = data_dict["next_observations"].copy()
+        
+        for pixel_key in self.pixel_keys:
+            if data_dict["observations"][pixel_key].shape[-1] != self._num_stack:
+                data_dict["observations"][pixel_key] = np.moveaxis(data_dict["observations"][pixel_key], 1, -1)
+                # print(data_dict["observations"][pixel_key].shape)
+            if data_dict["next_observations"][pixel_key].shape[-1] != self._num_stack:
+                data_dict["next_observations"][pixel_key] = np.moveaxis(data_dict["next_observations"][pixel_key], 1, -1)
+                # print(data_dict["next_observations"][pixel_key].shape)
 
         obs_pixels = {}
         next_obs_pixels = {}
@@ -73,6 +83,7 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
             for i in range(self._num_stack):
                 for pixel_key in self.pixel_keys:
                     data_dict["observations"][pixel_key] = obs_pixels[pixel_key][..., i]
+                    # print(f"Stacking {pixel_key} at index {self._insert_index}: {data_dict['observations'][pixel_key].shape}")
 
                 self._is_correct_index[self._insert_index] = False
                 super().insert(data_dict)
@@ -162,58 +173,56 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
 
         return batch
 
-def init_replay_buffer_from_demo_data(
-    demo_data: Any,
-    replay_buffer: Any,
-    pixel_keys: Tuple[str, ...] = ("pixels",),
-) -> "MemoryEfficientReplayBuffer":
-    # Load zarr dataset
-    root = demo_data
-    data = root["/data"]
-    meta = root["/meta"]
-    episode_ends = meta["episode_ends"][:]
+    def init_replay_buffer_from_demo_data(
+        self,
+        demo_data: Any,
+        pixel_keys: Tuple[str, ...] = ("pixels",),
+    ) -> "MemoryEfficientReplayBuffer":
+        # Load zarr dataset
+        root = demo_data
+        data = root["/data"]
+        meta = root["/meta"]
+        episode_ends = meta["episode_ends"][:]
 
-    # Parse episode boundaries
-    start_idx = 0
-    for end_idx in tqdm(episode_ends, desc="Processing episodes"):
-        for t in range(start_idx, end_idx-1):  # skip last index (no next_obs)
-            obs = {
-                "robot0_eef_pos": data["robot0_eef_pos"][t],
-                "robot0_eef_quat": data["robot0_eef_quat"][t],
-                "robot0_gripper_qpos": data["robot0_gripper_qpos"][t],
-            }
-            next_obs = {
-                "robot0_eef_pos": data["robot0_eef_pos"][t + 1],
-                "robot0_eef_quat": data["robot0_eef_quat"][t + 1],
-                "robot0_gripper_qpos": data["robot0_gripper_qpos"][t + 1],
-            }
+        # Parse episode boundaries
+        start_idx = 0
+        for end_idx in tqdm(episode_ends[:50], desc="Processing episodes"):
+            for t in range(start_idx, end_idx-1):  # skip last index (no next_obs)
+                obs = {
+                    "robot0_eef_pos": data["robot0_eef_pos"][t],
+                    "robot0_eef_quat": data["robot0_eef_quat"][t],
+                    "robot0_gripper_qpos": data["robot0_gripper_qpos"][t],
+                }
+                next_obs = {
+                    "robot0_eef_pos": data["robot0_eef_pos"][t + 1],
+                    "robot0_eef_quat": data["robot0_eef_quat"][t + 1],
+                    "robot0_gripper_qpos": data["robot0_gripper_qpos"][t + 1],
+                }
 
-            for key in pixel_keys:
-                obs[key] = data[key][t]
-                next_obs[key] = data[key][t + 1]
+                for key in pixel_keys:
+                    obs[key] = data[key][t]
+                    next_obs[key] = data[key][t + 1]
 
-            action = data["action"][t]
-            if t == (end_idx-2) :
-                reward = 1.0
-                done = True
-                mask = 0.0
-            else :
-                reward = 0.0
-                done = False
-                mask = 1.0 
+                action = data["action"][t]
+                if t == (end_idx-2) :
+                    reward = 1.0
+                    done = True
+                    mask = 0.0
+                else :
+                    reward = 0.0
+                    done = False
+                    mask = 1.0 
 
-            # Insert into buffer
-            replay_buffer.insert(
-                dict(
-                    observations=obs,
-                    actions=action,
-                    rewards=reward,
-                    masks=mask,
-                    dones=done,
-                    next_observations=next_obs,
+                # Insert into buffer
+                self.insert(
+                    dict(
+                        observations=obs,
+                        actions=action,
+                        rewards=reward,
+                        masks=mask,
+                        dones=done,
+                        next_observations=next_obs,
+                    )
                 )
-            )
 
-        start_idx = end_idx
-
-    return replay_buffer
+            start_idx = end_idx

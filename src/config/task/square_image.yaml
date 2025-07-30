@@ -37,7 +37,7 @@ env_runner:
   n_test_vis: 1
   test_start_seed: 100000
   # use python's eval function as resolver, single-quoted string as argument
-  max_steps: ${eval:'500 if "${task.dataset_type}" == "mh" else 400'}
+  max_steps: 1 # ${eval:'500 if "${task.dataset_type}" == "mh" else 400'}
   # max_steps: 400
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}

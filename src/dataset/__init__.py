@@ -1,2 +1,2 @@
-from src.dataset.memory_efficient_replay_buffer import MemoryEfficientReplayBuffer, init_replay_buffer_from_demo_data
+from src.dataset.memory_efficient_replay_buffer import MemoryEfficientReplayBuffer
 from src.dataset.replay_buffer import ReplayBuffer

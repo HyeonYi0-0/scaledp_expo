@@ -1,9 +1,8 @@
 #! /usr/bin/env python
-import dmcgym
 import gym
 import tqdm
 
-from src.dataset import MemoryEfficientReplayBuffer, init_replay_buffer_from_demo_data
+from src.dataset import MemoryEfficientReplayBuffer
 
 if __name__ == "__main__":
     import sys
@@ -60,6 +59,13 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
 
         # configure training state
         self.optimizer = self.model.get_optimizer(**cfg.optimizer)
+        
+        if cfg.training.debug:
+            cfg.start_training = 1
+            cfg.global_max_steps = 2
+            cfg.training.rollout_every = 1
+            cfg.training.checkpoint_every = 1
+            cfg.utd_ratio = 1
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -76,25 +82,37 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
         dataset: BaseImageDataset
         dataset = hydra.utils.instantiate(cfg.task.dataset)
         assert isinstance(dataset, BaseImageDataset)
+        
+        # configure rollout evaluation env
+        env_runner: BaseImageRunner
+        env_runner = hydra.utils.instantiate(
+            cfg.task.env_runner,
+            output_dir=self.output_dir)
+        assert isinstance(env_runner, BaseImageRunner)
+
+        # configure Online RL env
+        env = env_runner.get_environment()
+        env = gym.wrappers.RecordEpisodeStatistics(env, deque_size=1)
+        env.seed(cfg.seed)
 
         # configure RL replay buffer
         replay_buffer_size = cfg.replay_buffer_size or cfg.global_max_steps // action_repeat
         replay_buffer = MemoryEfficientReplayBuffer(
-            env.observation_space, env.action_space, replay_buffer_size
+            env.observation_space, env.action_space, replay_buffer_size, pixel_keys=("agentview_image", "robot0_eye_in_hand_image")
         )
         replay_buffer_iterator = replay_buffer.get_iterator(
             sample_args={
                 "batch_size": cfg.batch_size * cfg.utd_ratio,
-                "pack_obs_and_next_obs": True,
+                "pack_obs_and_next_obs": False,
             }
         )
         replay_buffer.seed(cfg.seed)
 
-        replay_buffer = init_replay_buffer_from_demo_data(
+        replay_buffer.init_replay_buffer_from_demo_data(
             demo_data=dataset.replay_buffer, 
-            replay_buffer=replay_buffer, 
             pixel_keys=("agentview_image", "robot0_eye_in_hand_image")
         )
+        print(f"Replay buffer size: {len(replay_buffer)}")
         
         # Set normalizer
         normalizer = dataset.get_normalizer()
@@ -126,18 +144,6 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
             self.ema_model.to(device)
         optimizer_to(self.optimizer, device)
 
-        # configure rollout evaluation env
-        env_runner: BaseImageRunner
-        env_runner = hydra.utils.instantiate(
-            cfg.task.env_runner,
-            output_dir=self.output_dir)
-        assert isinstance(env_runner, BaseImageRunner)
-
-        # configure Online RL env
-        env = env_runner.get_environment()
-        env = gym.wrappers.RecordEpisodeStatistics(env, deque_size=1)
-        env.seed(cfg.seed)
-
         # configure logging
         wandb_run = wandb.init(
             dir=str(self.output_dir),
@@ -154,6 +160,7 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
         kwargs = dict(cfg.agent)
         agent = Expo.create_pixels(
             cfg.seed,
+            cfg.shape_meta,
             env.observation_space,
             env.action_space,
             **kwargs,
@@ -179,12 +186,13 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                     action = env.action_space.sample()
                 else:
                     policy = self.model if cfg.training.use_ema else self.ema_model
-                    policy.eval()
-                    action, agent, _ = agent.on_the_fly(base_policy=policy,
-                                                     observation=observation)
+                    policy.eval() 
+                    action, agent, _ = agent.on_the_fly(base_policy=policy, obs=observation)
+                    # Reshape action from (1, 1, 7) to (1, 7)
+                    if isinstance(action, np.ndarray) and action.ndim == 3:
+                        action = action.squeeze(0)  # Remove the middle dimension
                     policy.train()
                 next_observation, reward, done, info = env.step(action)
-
                 mask = 1.0 if not done or "TimeLimit.truncated" in info else 0.0
 
                 replay_buffer.insert(
@@ -202,19 +210,18 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                 if done:
                     observation, done = env.reset(), False
                     # TODO: Check Validation
-                    for k, v in info["episode"].items():
-                        decode = {"r": "return", "l": "length", "t": "time"}
-                        wandb.log({f"agent/{decode[k]}": v}, step=i * action_repeat)
-
+                    # for k, v in info["episode"].items():
+                    #     decode = {"r": "return", "l": "length", "t": "time"}
+                    #     wandb.log({f"agent/{decode[k]}": v}, step=i * action_repeat)
                 if i >= cfg.start_training:
                     batch = next(replay_buffer_iterator)
                     policy = self.model if cfg.training.use_ema else self.ema_model
                     policy.eval()
-                    agent, update_info, mini_batch = agent.update(policy, batch, cfg.utd_ratio)
+                    agent, mini_batch, update_info = agent.update(policy, batch, cfg.utd_ratio)
                     policy.train()
                     
                     # Base policy update (finetuning)
-                    batch = dict_apply(mini_batch, lambda x: x.to(device, non_blocking=True))
+                    batch = dict_apply(mini_batch, lambda x: torch.from_numpy(x).to(device, non_blocking=True))
 
                     # compute loss
                     raw_loss = self.model.compute_loss(batch)
@@ -236,7 +243,8 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                     train_losses.append(raw_loss_cpu)
                     step_log = {
                         'base/train_loss': raw_loss_cpu,
-                        'base/lr': lr_scheduler.get_last_lr()[0]
+                        'base/lr': lr_scheduler.get_last_lr()[0],
+                        'step': i * action_repeat,
                     }
 
                     # ============ evaluate Base policy =============

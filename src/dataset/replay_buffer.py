@@ -5,6 +5,7 @@ import gym
 import gym.spaces
 import numpy as np
 
+from tqdm import tqdm
 from src.dataset.mdp_dataset import Dataset, DatasetDict
 
 
@@ -79,7 +80,7 @@ class ReplayBuffer(Dataset):
         queue = collections.deque()
 
         def enqueue(n):
-            for _ in range(n):
+            for _ in tqdm(range(n)):
                 data = self.sample(**sample_args)
                 queue.append(data)
 

@@ -155,15 +155,15 @@ def test():
     wrapper.seed(0)
 
     obs = wrapper.reset()
-    for i in range(100):
-        print(wrapper.action_space.sample())
+    while True :
         obs, reward, done, info = wrapper.step(wrapper.action_space.sample())
-        for k, v in obs.items():
-            print(f"{k}: {v.shape}")
-        print("reward: ", reward)
-        print("done: ", done)
-        print("info: ", info)
+        for key, value in obs.items():
+            if isinstance(value, np.ndarray):
+                print(f"{key}: {value.shape}, {value.dtype}")
+            else:
+                print(f"{key}: {value}")
         break
+        # wrapper.render()
 
     img = wrapper.render()
     plt.imsave('image_output.png', img)

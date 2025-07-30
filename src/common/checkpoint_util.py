@@ -36,11 +36,17 @@ class TopKCheckpointManager:
         # value 값을 로그 파일에 추가
         with open(value_log_path, 'a') as f:
             # f.write(f"{self.monitor_key}: {value}\n")
-            f.write(f"epoch :{data['epoch']}, {self.monitor_key}: {value}\n")
+            if 'epoch' in data.keys():
+                f.write(f"epoch :{data['epoch']}, {self.monitor_key}: {value}\n")
+            else:
+                f.write(f"step :{data['step']}, {self.monitor_key}: {value}\n")
 
         # wandb loging
         if self.wandb_run is not None:
-            self.wandb_run.log({self.monitor_key: value, "epoch": data["epoch"]})
+            if 'epoch' in data.keys():
+                self.wandb_run.log({self.monitor_key: value, "epoch": data["epoch"]})
+            else:
+                self.wandb_run.log({self.monitor_key: value, "step": data["step"]})
 
         if len(self.path_value_map) < self.k:
             # under-capacity

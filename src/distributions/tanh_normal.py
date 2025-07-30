@@ -52,8 +52,9 @@ class Normal(nn.Module):
         # Try to infer the output size from the backbone
         with torch.no_grad():
             dummy_input = torch.randn(1, 10)  # dummy input to infer size
+            dummy_input2 = torch.randn(1, 10)  # another dummy input for robustness
             try:
-                dummy_output = self.backbone(dummy_input)
+                dummy_output = self.backbone(dummy_input, dummy_input2)
                 backbone_output_size = dummy_output.shape[-1]
             except:
                 # Fallback to hidden_dims if available
@@ -77,8 +78,8 @@ class Normal(nn.Module):
             nn.init.xavier_uniform_(self.log_std_head.weight)
             nn.init.zeros_(self.log_std_head.bias)
 
-    def forward(self, inputs, *args, **kwargs) -> dist.Distribution:
-        x = self.backbone(inputs, *args, **kwargs)
+    def forward(self, observation, action, *args, **kwargs) -> dist.Distribution:
+        x = self.backbone(observation, action, *args, **kwargs)
 
         means = self.mean_head(x)
         

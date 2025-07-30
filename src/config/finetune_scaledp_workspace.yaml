@@ -4,8 +4,8 @@ defaults:
   - task: square_image
 
 # Project settings
-project_name: "finetune_robomimic_image"
-_target_: src.workspace.pretrain_scaledp_workspace.TrainScaleDPWorkspace
+name: "finetune_robomimic_image"
+_target_: src.workspace.finetune_scaledp_workspace.finetuneScaleDPWorkspace
 
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
@@ -65,10 +65,10 @@ log_interval: 1000
 utd_ratio: 20
 batch_size: 256
 global_max_steps: 500000  # 5e5
-start_training: ${batch_size}*${utd_ratio}  # 1e3
+start_training: ${eval:'int(${batch_size}*${utd_ratio})'}  # 1e3
 
 # Environment settings
-replay_buffer_size: null  # Will use global_max_steps // action_repeat if null
+replay_buffer_size: 1000000  # Will use global_max_steps // action_repeat if null
 action_repeat: 1  # Will use PLANET defaults if null
 
 # Agent configuration
@@ -88,6 +88,7 @@ agent:
   target_entropy: null
   init_temperature: 1.0
   backup_entropy: true
+  device: "cuda:1"  # or "cuda"
 
 # Training configuration
 training:
@@ -97,10 +98,11 @@ training:
   lr_scheduler: "cosine"
   lr_warmup_steps: 1000
   gradient_accumulate_every: 1
-  # debug: false
+  debug: True
   resume: True
-  rollout_every: 4000       # 단위: step
-  checkpoint_every: 4000    # 단위: step
+  num_cycles: 100
+  rollout_every: 1000       # 단위: step
+  checkpoint_every: 1000    # 단위: step
 
 # Checkpointing
 checkpoint:
@@ -108,7 +110,7 @@ checkpoint:
     monitor_key: test_mean_score
     mode: max
     k: 5
-    format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
+    format_str: 'step={step:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False
 

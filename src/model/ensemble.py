@@ -22,8 +22,9 @@ class Ensemble(nn.Module):
 
 def subsample_ensemble(networks, num_sample: int, num_qs: int, device='cpu'):
     """Subsample ensemble networks for REDQ-style training"""
-    if num_sample is not None and num_sample < num_qs:
-        indices = torch.randperm(num_qs, device=device)[:num_sample]
-        # Return a subset of networks based on indices
-        return [networks[i] for i in indices]
-    return networks
+    if num_sample is None or num_sample >= num_qs:
+        return networks
+    
+    indices = torch.randperm(num_qs, device=device)[:num_sample]
+    # Return a subset of networks based on indices
+    return [networks[i] for i in indices]

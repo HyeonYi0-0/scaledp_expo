@@ -20,6 +20,8 @@ import robomimic.utils.obs_utils as ObsUtils
 import robomimic.models.base_nets as rmbn
 import src.model.vision.crop_randomizer as dmvc
 from src.common.pytorch_util import dict_apply, replace_submodules
+from src.real_world.real_inference_util import get_real_obs_dict
+from tqdm import tqdm
 
 DataType = Union[np.ndarray, torch.Tensor, Dict[str, "DataType"]]
 DatasetDict = Dict[str, DataType]
@@ -93,11 +95,13 @@ class Temperature(nn.Module):
         return torch.exp(self.log_temp)
 
 class Expo(Agent):
-    def __init__(self, 
+    def __init__(self,
+                 shape_meta, 
                  actor, 
                  critic, 
                  target_critic, 
-                 obs_encoder,
+                 actor_obs_encoder,
+                 critic_obs_encoder,
                  temp, 
                  optimizer_actor, 
                  optimizer_critic, 
@@ -113,7 +117,9 @@ class Expo(Agent):
                  device='cpu'):
         
         super().__init__(actor, device)
-        self.obs_encoder = obs_encoder
+        self.shape_meta = shape_meta
+        self.actor_obs_encoder = actor_obs_encoder
+        self.critic_obs_encoder = critic_obs_encoder
         self.critic = critic
         self.target_critic = target_critic
         self.temp = temp
@@ -135,6 +141,7 @@ class Expo(Agent):
                                  eval_fixed_crop=False,
                                  task_name: str = 'square',
                                  dataset_type: str = 'ph',
+                                 device: str = 'cpu'
                                 ) -> Optional[nn.Module]:
         # parse shape_meta
         action_shape = shape_meta['action']['shape']
@@ -192,7 +199,7 @@ class Expo(Agent):
                 config=config,
                 obs_key_shapes=obs_key_shapes,
                 ac_dim=action_dim,
-                device='cpu',
+                device=device,
             )
 
         obs_encoder = policy.nets['policy'].nets['encoder'].nets['obs']
@@ -263,20 +270,22 @@ class Expo(Agent):
             target_entropy = -action_dim / 2
             
         # Create obs encoder
-        obs_encoder = cls._get_observation_encoder(shape_meta=shape_meta,
+        actor_obs_encoder = cls._get_observation_encoder(shape_meta=shape_meta,
                                                    crop_shape=crop_shape,
                                                    obs_encoder_group_norm=obs_encoder_group_norm,
                                                    eval_fixed_crop=eval_fixed_crop,
                                                    task_name=task_name,
-                                                   dataset_type=dataset_type)
+                                                   dataset_type=dataset_type,
+                                                   device=device)
+        critic_obs_encoder = copy.deepcopy(actor_obs_encoder)
 
         # Create actor network  
-        obs_feature_dim = obs_encoder.output_shape()[0]
+        obs_feature_dim = actor_obs_encoder.output_shape()[0]
         actor_hidden_dims = list(hidden_dims)
         actor_base_cls = partial(MLP, hidden_dims=actor_hidden_dims, activate_final=True)
-        actor_base_cls = EditPolicy(base_cls=actor_base_cls, input_dim=obs_feature_dim + action_dim)
+        actor_base_cls = partial(EditPolicy, base_cls=actor_base_cls, input_dim=obs_feature_dim + action_dim)
         actor = TanhNormal(actor_base_cls, action_dim).to(device)
-        optim_groups = [{'params': actor.parameters()}, {'params': obs_encoder.parameters()}]
+        optim_groups = [{'params': actor.parameters()}, {'params': actor_obs_encoder.parameters()}]
         optimizer_actor = optim.Adam(optim_groups, lr=edit_policy_lr)
 
         # Create critic ensemble
@@ -299,17 +308,20 @@ class Expo(Agent):
         target_critic = copy.deepcopy(critic)
 
         # Create optimizer
-        optim_groups = [{'params': critic.parameters()}, {'params': obs_encoder.parameters()}]
+        optim_groups = [{'params': critic.parameters()}, {'params': critic_obs_encoder.parameters()}]
         optimizer_critic = optim.Adam(optim_groups, lr=critic_lr)
 
         # Create temperature
         temp = Temperature(init_temperature).to(device)
         optimizer_temp = optim.Adam(temp.parameters(), lr=temp_lr)
 
-        return cls(actor=actor, 
+        return cls(
+                  shape_meta=shape_meta,
+                  actor=actor, 
                   critic=critic,
                   target_critic=target_critic,
-                  obs_encoder=obs_encoder,
+                  actor_obs_encoder=actor_obs_encoder,
+                  critic_obs_encoder=critic_obs_encoder,
                   temp=temp,
                   optimizer_actor=optimizer_actor,
                   optimizer_critic=optimizer_critic,
@@ -409,66 +421,75 @@ class Expo(Agent):
         # extract actions
         actions = []
         dists = []
+        np_obs_dict, edit_obs_dict = get_real_obs_dict(env_obs=dict(obs), shape_meta=self.shape_meta)
+        base_obs_dict = dict_apply(np_obs_dict, lambda x: torch.from_numpy(x).to(device=self.device))
+        value = next(iter(base_obs_dict.values()))
+        B, To = value.shape[:2]
+
+        edit_obs_dict = dict_apply(edit_obs_dict, lambda x: torch.from_numpy(x).float().to(self.device))
         for _ in range(self.n_samples):
             # from base policy
-            np_obs_dict = dict(obs)
-            obs_dict = dict_apply(np_obs_dict, lambda x: torch.from_numpy(x).to(device=self.device))
             with torch.no_grad():
-                action_dict = base_policy.predict_action(obs_dict)
-            np_action_dict = dict_apply(action_dict, lambda x: x.detach().to('cpu').numpy())
-            base_action = np_action_dict['action']
+                action_dict = base_policy.predict_action(base_obs_dict)
+            # np_action_dict = dict_apply(action_dict, lambda x: x.detach().to('cpu').numpy())
+            base_action = action_dict['action'].to(self.device)
             actions.append(base_action)
             
             # from actor
-            obs_tensor = torch.from_numpy(obs).float().to(self.device)
-            base_action_tensor = torch.from_numpy(base_action).float().to(self.device)
-            if obs_tensor.dim() == 1:   
-                obs_tensor = obs_tensor.unsqueeze(0)
-            action, dist = _sample_actions(self.actor, obs_tensor, base_action_tensor, clip_beta=self.clip_beta)
-            actions.append(base_action + action.cpu().numpy())
+            obs_feature = self.actor_obs_encoder(edit_obs_dict)
+            obs_feature = obs_feature.reshape(B, To, -1)
+            action, dist = _sample_actions(self.actor, obs_feature, base_action, clip_beta=self.clip_beta)
+            actions.append(base_action + action)
             dists.extend([dist, dist])
 
         assert len(actions) == self.n_samples * 2, f"Expected {self.n_samples * 2} actions, got {len(actions)}"
 
         # select one action based on the highest Q-value
-        actions = np.stack(actions, axis=0)
-        obs_tensor = torch.from_numpy(obs).float().to(self.device)
-        if obs_tensor.dim() == 1:
-            obs_tensor = obs_tensor.unsqueeze(0)
-        # Repeat encoded_obs for each action to actions
-        encoded_obs = self.obs_encoder(obs_tensor)
-        if encoded_obs.dim() == 2 and actions.shape[0] > 1:
-            encoded_obs = encoded_obs.repeat(actions.shape[0], 1)
+        actions = torch.stack(actions, dim=0)
+        # Repeat encoded_obs for each action to match actions dimensions
+        encoded_obs = self.critic_obs_encoder(edit_obs_dict)
+        obs_feature = obs_feature.reshape(B, To, -1)
+        # Reshape encoded_obs to match actions shape: [16, 1, 1, 137]
+        encoded_obs = encoded_obs.unsqueeze(1)  # [B, 1, 1, feature_dim]
+        encoded_obs = encoded_obs.repeat(actions.shape[0], 1, 1, 1)  # [16, 1, 1, 137]
         target_q_values = []
-        critics_to_use = self.target_critic[:self.num_min_qs]
-        actions = torch.from_numpy(actions).float().to(self.device)
+        critics_to_use = subsample_ensemble(self.target_critic.networks, self.num_min_qs, self.num_qs, device=self.device)
         
         for target_critic_net in critics_to_use:
             target_q = target_critic_net(encoded_obs, actions)
             target_q_values.append(target_q)
-
-        target_q_values = torch.stack(target_q_values, dim=0).min(dim=0)
-        best_action_idx = target_q_values.argmax().item()
+        target_Q, _ = torch.stack(target_q_values, dim=0).min(dim=0)
+        target_Q = target_Q.squeeze()
+        if target_Q.dim() > 1:
+            target_Q = target_Q.mean(dim=tuple(range(1, target_Q.dim())))
+        best_action_idx = target_Q.argmin()
         best_action = actions[best_action_idx]
         best_dist = dists[best_action_idx]
         best_action = best_action.cpu().numpy()
+        # clip best_action to [-1, 1]
+        best_action = np.clip(best_action, -1.0, 1.0)
         
         return best_action, self, best_dist
 
-    def update_actor(self, policy, batch: DatasetDict) -> Tuple['Expo', Dict[str, float]]:
-        observations = torch.from_numpy(batch["observations"]).float().to(self.device)
+    def update_actor(self, batch: DatasetDict) -> Tuple['Expo', Dict[str, float]]:
+        base_obs_np, obs_np = get_real_obs_dict(env_obs=dict(batch["observations"]), shape_meta=self.shape_meta)
+        observations = dict_apply(obs_np, lambda x: torch.from_numpy(x).float().to(self.device))
         actions = torch.from_numpy(batch["actions"]).float().to(self.device)
+        value = next(iter(base_obs_np.values()))
+        B, To = value.shape[:2]
         
         self.optimizer_actor.zero_grad()
         
         # Sample actions from current policy
-        edit_actions, dist = _sample_actions(self.actor, observations, actions, clip_beta=self.clip_beta)
+        obs_feature = self.actor_obs_encoder(observations)
+        obs_feature = obs_feature.reshape(B, To, -1)
+        edit_actions, dist = _sample_actions(self.actor, obs_feature, actions, clip_beta=self.clip_beta)
         log_probs = dist.log_prob(edit_actions)
         
         # Get Q-values from all critics
         q_values = []
-        encoded_obs = self.obs_encoder(observations)
-        for critic_net in self.critic:
+        encoded_obs = self.critic_obs_encoder(observations).reshape(B, To, -1)
+        for critic_net in self.critic.networks:
             q_val = critic_net(encoded_obs, (actions + edit_actions))
             q_values.append(q_val)
         
@@ -502,24 +523,28 @@ class Expo(Agent):
         }
 
     def update_critic(self, policy, batch: DatasetDict) -> Tuple['Expo', Dict[str, float]]:
-        observations = torch.from_numpy(batch["observations"]).float().to(self.device)
+        _, obs_np = get_real_obs_dict(env_obs=dict(batch["observations"]), shape_meta=self.shape_meta)
+        observations = dict_apply(obs_np, lambda x: torch.from_numpy(x).float().to(self.device))
+        next_base_obs_np, next_obs_np = get_real_obs_dict(env_obs=dict(batch["next_observations"]), shape_meta=self.shape_meta)
+        next_observations = dict_apply(next_obs_np, lambda x: torch.from_numpy(x).float().to(self.device))
         actions = torch.from_numpy(batch["actions"]).float().to(self.device)
         rewards = torch.from_numpy(batch["rewards"]).float().to(self.device)
-        next_observations = torch.from_numpy(batch["next_observations"]).float().to(self.device)
         masks = torch.from_numpy(batch["masks"]).float().to(self.device)
+        
+        value = next(iter(next_base_obs_np.values()))
+        B, To = value.shape[:2]
         
         self.optimizer_critic.zero_grad()
         
         with torch.no_grad():
             # Sample next actions from policy
-            next_actions, _, next_dist = self.on_the_fly(base_policy=policy,
-                                           obs=next_observations.cpu().numpy())
+            next_actions, _, next_dist = self.on_the_fly(base_policy=policy, obs=batch["next_observations"])
             next_actions = torch.from_numpy(next_actions).float().to(self.device)
             
             # Get target Q-values (use subset for REDQ if specified)
             target_q_values = []
-            critics_to_use = self.target_critic[:self.num_min_qs]
-            encoded_next_obs = self.obs_encoder(next_observations)
+            critics_to_use = subsample_ensemble(self.target_critic.networks, self.num_min_qs, self.num_qs, device=self.device)
+            encoded_next_obs = self.critic_obs_encoder(next_observations).reshape(B, To, -1)
             for target_critic_net in critics_to_use:
                 target_q = target_critic_net(encoded_next_obs, next_actions)
                 target_q_values.append(target_q)
@@ -538,8 +563,8 @@ class Expo(Agent):
         # Compute critic loss
         critic_losses = []
         q_predictions = []
-        encoded_obs = self.obs_encoder(observations)
-        for critic_net in self.critic:
+        encoded_obs = self.critic_obs_encoder(observations).reshape(B, To, -1)
+        for critic_net in self.critic.networks:
             q_pred = critic_net(encoded_obs, actions)
             critic_loss = F.mse_loss(q_pred, target_q)
             critic_losses.append(critic_loss)
@@ -563,32 +588,39 @@ class Expo(Agent):
         new_agent = self
         
         # Update critic multiple times (UTD ratio)
-        for i in range(utd_ratio):
+        for i in tqdm(range(utd_ratio)):
             # Create mini-batch for this update
-            batch_size = len(batch["observations"]) // utd_ratio
+            batch_size = len(batch["actions"]) // utd_ratio
             start_idx = batch_size * i
             end_idx = batch_size * (i + 1)
-            
+
             mini_batch = {}
             for key, value in batch.items():
-                mini_batch[key] = value[start_idx:end_idx]
-            
+                if isinstance(value, dict):
+                    mini_batch[key] = {k: v[start_idx:end_idx] for k, v in value.items()}
+                else:
+                    mini_batch[key] = value[start_idx:end_idx]
             new_agent, critic_info = new_agent.update_critic(policy, mini_batch)
-        
-        # Update actor once
-        new_agent, actor_info = new_agent.update_actor(policy, mini_batch)
 
+        # Update actor once
+        new_agent, actor_info = new_agent.update_actor(mini_batch)
         # Update temperature once
         new_agent, temp_info = new_agent.update_temperature(actor_info["entropy"])
         
-        return new_agent, mini_batch, {**actor_info, **critic_info, **temp_info}
+        base_ops_np, _ = get_real_obs_dict(env_obs=dict(mini_batch["observations"]), shape_meta=self.shape_meta)
+        batch = {
+            "obs": base_ops_np,
+            "action": mini_batch["actions"],
+        }
+
+        return new_agent, batch, {**actor_info, **critic_info, **temp_info}
 
     def state_dict(self):
         """Return state dict for saving model"""
         return {
             'actor': self.actor.state_dict(),
-            'critic': [net.state_dict() for net in self.critic],
-            'target_critic': [net.state_dict() for net in self.target_critic],
+            'critic': [net.state_dict() for net in self.critic.networks],
+            'target_critic': [net.state_dict() for net in self.target_critic.networks],
             'temp': self.temp.state_dict(),
             'optimizer_actor': self.optimizer_actor.state_dict(),
             'optimizer_critic': self.optimizer_critic.state_dict(),
