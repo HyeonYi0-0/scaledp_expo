@@ -59,13 +59,13 @@ ema:
   update_after_step: 0
 
 # log settings
-log_interval: 1000
+log_interval: 10000
 
 # Training settings
 utd_ratio: 20
 batch_size: 256
-global_max_steps: 500000  # 5e5
-start_training: ${eval:'int(${batch_size}*${utd_ratio})'}  # 1e3
+global_max_steps: 250000  # 5e5
+start_training: 0 # ${eval:'int(${batch_size}*${utd_ratio})'}  # 1e3
 
 # Environment settings
 replay_buffer_size: 1000000  # Will use global_max_steps // action_repeat if null
@@ -88,21 +88,23 @@ agent:
   target_entropy: null
   init_temperature: 1.0
   backup_entropy: true
+  ckpt_name: "agent_ckpt.pth"
   device: "cuda:1"  # or "cuda"
 
 # Training configuration
 training:
   seed: 42
-  device: "cuda:3"  # or "cuda"
+  device: "cuda:1"  # or "cuda"
   use_ema: True
   lr_scheduler: "cosine"
   lr_warmup_steps: 1000
   gradient_accumulate_every: 1
-  debug: True
-  resume: True
+  debug: False
+  resume: "data/outputs/2025.07.25/14.12.38_train_robomimic_image_square_image/checkpoints"
+  ckpt_name: "epoch=0050-test_mean_score=0.840.ckpt"  # Name of the checkpoint to resume from
   num_cycles: 100
-  rollout_every: 1000       # 단위: step
-  checkpoint_every: 1000    # 단위: step
+  rollout_every: 10000       # 단위: step
+  checkpoint_every: 10000    # 단위: step
 
 # Checkpointing
 checkpoint:

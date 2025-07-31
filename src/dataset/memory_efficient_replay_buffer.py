@@ -186,7 +186,7 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
 
         # Parse episode boundaries
         start_idx = 0
-        for end_idx in tqdm(episode_ends[:50], desc="Processing episodes"):
+        for end_idx in tqdm(episode_ends, desc="Processing episodes"):
             for t in range(start_idx, end_idx-1):  # skip last index (no next_obs)
                 obs = {
                     "robot0_eef_pos": data["robot0_eef_pos"][t],

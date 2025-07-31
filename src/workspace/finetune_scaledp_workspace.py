@@ -73,10 +73,11 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
 
         # resume training
         if cfg.training.resume:
-            lastest_ckpt_path = self.get_checkpoint_path()
-            if lastest_ckpt_path.is_file():
-                print(f"Resuming from checkpoint {lastest_ckpt_path}")
-                self.load_checkpoint(path=lastest_ckpt_path)
+            # lastest_ckpt_path = self.get_checkpoint_path()
+            resume_ckpt_path = pathlib.Path(cfg.training.resume, cfg.training.ckpt_name)
+            if resume_ckpt_path.is_file():
+                print(f"Resuming from checkpoint {resume_ckpt_path}")
+                self.load_checkpoint(path=resume_ckpt_path)
 
         # configure dataset
         dataset: BaseImageDataset
@@ -158,6 +159,7 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
 
         # configure Agent (Edit, on-the-fly)
         kwargs = dict(cfg.agent)
+        kwargs.pop('ckpt_name')
         agent = Expo.create_pixels(
             cfg.seed,
             cfg.shape_meta,
@@ -165,6 +167,14 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
             env.action_space,
             **kwargs,
         )
+        
+        if cfg.training.resume:
+            agent_ckpt_path = pathlib.Path(cfg.training.resume, cfg.agent.ckpt_name)
+            if os.path.isfile(agent_ckpt_path):
+                print(f"Loading agent from {agent_ckpt_path}")
+                agent.load_state_dict(torch.load(agent_ckpt_path)['agent_state_dict'])
+            else:
+                print(f"Agent checkpoint not found at {agent_ckpt_path}, starting from scratch.")
 
         # configure checkpoint
         topk_manager = TopKCheckpointManager(

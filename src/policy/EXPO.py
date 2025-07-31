@@ -458,11 +458,11 @@ class Expo(Agent):
         for target_critic_net in critics_to_use:
             target_q = target_critic_net(encoded_obs, actions)
             target_q_values.append(target_q)
-        target_Q, _ = torch.stack(target_q_values, dim=0).min(dim=0)
+        target_Q, _ = torch.stack(target_q_values, dim=0).max(dim=0)
         target_Q = target_Q.squeeze()
         if target_Q.dim() > 1:
             target_Q = target_Q.mean(dim=tuple(range(1, target_Q.dim())))
-        best_action_idx = target_Q.argmin()
+        best_action_idx = target_Q.argmax()
         best_action = actions[best_action_idx]
         best_dist = dists[best_action_idx]
         best_action = best_action.cpu().numpy()
@@ -549,8 +549,7 @@ class Expo(Agent):
                 target_q = target_critic_net(encoded_next_obs, next_actions)
                 target_q_values.append(target_q)
             
-            # Take minimum for conservative estimate
-            target_q = torch.stack(target_q_values, dim=0).min(dim=0)[0]
+            target_q = torch.stack(target_q_values, dim=0).max(dim=0)[0]
             
             # Compute target
             target_q = rewards + self.discount * masks * target_q
