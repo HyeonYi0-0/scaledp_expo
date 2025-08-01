@@ -28,6 +28,7 @@ import shutil
 from src.workspace.base_workspace import BaseWorkspace
 from src.policy.ScaleDP_hybrid_image_policy import ScaleDiffusionTransformerHybridImagePolicy
 from src.policy.EXPO import Expo
+from src.policy.fast_EXPO import fast_Expo
 from src.dataset.base_dataset import BaseImageDataset
 from src.env_runner.base_image_runner import BaseImageRunner
 from src.common.checkpoint_util import TopKCheckpointManager
@@ -160,7 +161,7 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
         # configure Agent (Edit, on-the-fly)
         kwargs = dict(cfg.agent)
         kwargs.pop('ckpt_name')
-        agent = Expo.create_pixels(
+        agent = fast_Expo.create_pixels(
             cfg.seed,
             cfg.shape_meta,
             env.observation_space,
