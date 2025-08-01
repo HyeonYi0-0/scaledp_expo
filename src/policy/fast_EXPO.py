@@ -97,6 +97,7 @@ class Temperature(nn.Module):
 class fast_Expo(Agent):
     def __init__(self,
                  shape_meta, 
+                 accumulate_every,
                  actor, 
                  critic, 
                  target_critic, 
@@ -118,6 +119,7 @@ class fast_Expo(Agent):
         
         super().__init__(actor, device)
         self.shape_meta = shape_meta
+        self.accumulate_every = accumulate_every
         self.actor_obs_encoder = actor_obs_encoder
         self.critic_obs_encoder = critic_obs_encoder
         self.critic = critic
@@ -235,6 +237,7 @@ class fast_Expo(Agent):
     def create_pixels(cls,
                seed: int,
                shape_meta: dict,
+               accumulate_every: int,
                observation_space: gym.Space,
                action_space: gym.Space,
                edit_policy_lr: float = 3e-4,
@@ -316,6 +319,7 @@ class fast_Expo(Agent):
         optimizer_temp = optim.Adam(temp.parameters(), lr=temp_lr)
 
         return cls(
+                  accumulate_every=accumulate_every,
                   shape_meta=shape_meta,
                   actor=actor, 
                   critic=critic,
@@ -430,27 +434,36 @@ class fast_Expo(Agent):
         B, To = next(iter(base_obs.values())).shape[:2]
 
         # 2) base_policy 예측을 배치 차원으로 확장
-        action_base = base_policy.predict_action(base_obs)['action']  # [B, ...]
-        action_base = action_base.unsqueeze(0).expand(self.n_samples, *action_base.shape)  # [n_samples, B, ...]
+        base_obs = dict_apply(base_obs, lambda x: x.repeat((self.n_samples), *[1]*(x.dim() - 1)))  # [n_samples*B, To, obs_dim]
+        action_base = base_policy.predict_action(base_obs)['action']  # [n_samples*B, To, action_dim]
 
         # 3) actor 샘플도 벡터화
-        obs_feat = self.actor_obs_encoder(edit_obs).reshape(B, To, -1)
-        obs_feat = obs_feat.unsqueeze(0).expand(self.n_samples, B, To, obs_feat.size(-1))
-        delta_actions, dists = _sample_actions(self.actor, obs_feat, action_base, clip_beta=self.clip_beta)
-        actions = action_base + delta_actions  # shape: [n_samples, B, action_dim]
+        edit_obs = dict_apply(edit_obs, lambda x: x.repeat((self.n_samples), *[1] * (x.dim() - 1)))  # [n_samples*B, To, obs_dim]
+        obs_feat = self.actor_obs_encoder(edit_obs).reshape(self.n_samples, B, To, -1) # [n_samples, B, To, obs_feat_dim]
+        base_action = action_base.reshape(self.n_samples, B, To, -1)  # [n_samples, B, To, action_dim]
+        
+        delta_actions = []
+        dists = []
+        for feature, action in zip(obs_feat, base_action):
+            delta_action, dist = _sample_actions(self.actor, feature, action, clip_beta=self.clip_beta)
+            delta_actions.append(delta_action)
+            dists.append(dist)
+        delta_actions = torch.stack(delta_actions, dim=0).reshape(self.n_samples*B, To, -1)  # [n_samples*B, To, action_dim]
+        edited_actions = action_base + delta_actions  # shape: [n_samples*B, To, action_dim]
+        actions = torch.cat([edited_actions, action_base], dim=0)  # [2*n_samples*B, To, action_dim]
 
         # 4) critic 평가를 한번에
-        actions_flat = actions.reshape(self.n_samples * B, -1)
-        encoded_obs = self.critic_obs_encoder(edit_obs).unsqueeze(1).repeat(self.n_samples, 1, 1, 1)
-        encoded_flat = encoded_obs.reshape(self.n_samples * B, *encoded_obs.shape[2:])
+        encoded_obs = self.critic_obs_encoder(edit_obs).unsqueeze(1).repeat(1, To, 1).repeat(2, 1, 1) # [n_samples*B, To, obs_feat_dim]
         critics = subsample_ensemble(self.target_critic.networks, self.num_min_qs, self.num_qs, device=self.device)
-        qs = torch.stack([net(encoded_flat, actions_flat) for net in critics], dim=0)
+        qs = torch.stack([net(encoded_obs, actions) for net in critics], dim=0)
         target_Q, _ = qs.max(dim=0)
-        target_Q = target_Q.reshape(self.n_samples, B)
-        # 평균하거나 argmax 기준 찾기
+        target_Q = target_Q.reshape(self.n_samples*2, B, -1)  # [n_samples, B, 1]
         best_idx = target_Q.mean(dim=1).argmax()
+
+        actions = actions.reshape(self.n_samples*2, B, To, -1)  # [n_samples, B, To, action_dim]
         best_action = actions[best_idx]
-        best_dist = dists[best_idx]
+        
+        best_dist = dists[(best_idx%self.n_samples)]
         
         best = None
         if sub_obs is None:
@@ -460,9 +473,10 @@ class fast_Expo(Agent):
 
         return best, self, best_dist
 
-    def update_actor(self, batch: DatasetDict, base_obs_np: Dict[str, torch.Tensor]) -> Tuple['Expo', Dict[str, float]]:
+    def update_actor(self, batch: DatasetDict) -> Tuple['Expo', Dict[str, float]]:
         observations = batch["observations"]
         actions = batch["actions"]
+        base_obs_np = batch["base_obs"]
         B, To = next(iter(base_obs_np.values())).shape[:2]
         
         self.optimizer_actor.zero_grad()
@@ -509,20 +523,21 @@ class fast_Expo(Agent):
             "temperature_loss": temp_loss.item()
         }
 
-    def update_critic(self, policy, batch: DatasetDict, next_base_obs_np: Dict[str, torch.Tensor]) -> Tuple['Expo', Dict[str, float]]:
+    def update_critic(self, policy, batch: DatasetDict) -> Tuple['Expo', Dict[str, float]]:
         observations = batch["observations"]
         next_observations = batch["next_observations"]
         actions = batch["actions"]
         rewards = batch["rewards"]
         masks = batch["masks"]
+        next_base_obs = batch["next_base_obs"]
         
-        B, To = next(iter(next_base_obs_np.values())).shape[:2]
+        B, To = next(iter(next_base_obs.values())).shape[:2]
         
         self.optimizer_critic.zero_grad()
         
         with torch.no_grad():
             # Sample next actions from policy
-            next_actions, _, next_dist = self.on_the_fly(base_policy=policy, obs=next_base_obs_np, sub_obs=next_observations)
+            next_actions, _, next_dist = self.on_the_fly(base_policy=policy, obs=next_base_obs, sub_obs=next_observations)
             
             # Get target Q-values (use subset for REDQ if specified)
             target_q_values = []
@@ -535,6 +550,8 @@ class fast_Expo(Agent):
             target_q = torch.stack(target_q_values, dim=0).max(dim=0)[0]
             
             # Compute target
+            rewards = rewards.view(B, 1)
+            masks = masks.view(B, 1)
             target_q = rewards + self.discount * masks * target_q
             
             if self.backup_entropy:
@@ -571,9 +588,13 @@ class fast_Expo(Agent):
         
         # 1. 관찰값 인코딩을 한 번만 수행
         base_np, edit_np = get_real_obs_dict(env_obs=dict(batch["observations"]), shape_meta=self.shape_meta)
-        observations = dict_apply(edit_np, lambda x: torch.from_numpy(x).float().to(self.device))
+        edit_obs = dict_apply(edit_np, lambda x: torch.from_numpy(x).float().to(self.device))
+        base_obs = dict_apply(base_np, lambda x: torch.from_numpy(x).float().to(self.device))
+        
         next_base_np, next_edit_np = get_real_obs_dict(env_obs=dict(batch["next_observations"]), shape_meta=self.shape_meta)
-        next_observations = dict_apply(next_edit_np, lambda x: torch.from_numpy(x).float().to(self.device))
+        next_edit_obs = dict_apply(next_edit_np, lambda x: torch.from_numpy(x).float().to(self.device))
+        next_base_obs = dict_apply(next_base_np, lambda x: torch.from_numpy(x).float().to(self.device))
+        
         actions = torch.from_numpy(batch["actions"]).float().to(self.device)
         rewards = torch.from_numpy(batch["rewards"]).float().to(self.device)
         masks = torch.from_numpy(batch["masks"]).float().to(self.device)
@@ -585,27 +606,29 @@ class fast_Expo(Agent):
             start_idx = batch_size * i
             end_idx = batch_size * (i + 1)
             mini_batches.append({
-                'observations': {k: v[start_idx:end_idx] for k, v in observations.items()},
-                'next_observations': {k: v[start_idx:end_idx] for k, v in next_observations.items()},
+                'observations': {k: v[start_idx:end_idx] for k, v in edit_obs.items()},
+                'next_observations': {k: v[start_idx:end_idx] for k, v in next_edit_obs.items()},
                 'actions': actions[start_idx:end_idx],
                 'rewards': rewards[start_idx:end_idx],
-                'masks': masks[start_idx:end_idx]
+                'masks': masks[start_idx:end_idx],
+                'base_obs': {k: v[start_idx:end_idx] for k, v in base_obs.items()},
+                'next_base_obs': {k: v[start_idx:end_idx] for k, v in next_base_obs.items()},
             })
         
         print("Updating critic networks...")
         # 3. Critic 업데이트를 배치로 처리 (tqdm 제거)
         for mini_batch in mini_batches: 
-            new_agent, critic_info = new_agent.update_critic(policy, mini_batch, next_base_obs_np=next_base_np)
+            new_agent, critic_info = new_agent.update_critic(policy, mini_batch)
         
         print("Updating actor and temperature...")
         # Update actor once
-        new_agent, actor_info = new_agent.update_actor(mini_batch, base_obs_np=base_np)
+        new_agent, actor_info = new_agent.update_actor(mini_batches[-1])
         # Update temperature once
         new_agent, temp_info = new_agent.update_temperature(actor_info["entropy"])
         
         batch = {
-            "obs": base_np,
-            "action": mini_batch["actions"],
+            "obs": mini_batches[-1]["base_obs"],
+            "action": mini_batches[-1]["actions"],
         }
 
         return new_agent, batch, {**actor_info, **critic_info, **temp_info}

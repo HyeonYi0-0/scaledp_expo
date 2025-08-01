@@ -80,7 +80,7 @@ class ReplayBuffer(Dataset):
         queue = collections.deque()
 
         def enqueue(n):
-            for _ in tqdm(range(n)):
+            for _ in range(n):
                 data = self.sample(**sample_args)
                 queue.append(data)
 

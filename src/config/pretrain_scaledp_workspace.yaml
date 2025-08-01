@@ -9,7 +9,7 @@ task_name: ${task.name}
 shape_meta: ${task.shape_meta}
 exp_name: "default"
 
-horizon: 8
+horizon: 1
 n_obs_steps: 1
 n_action_steps: 1
 seed: 42

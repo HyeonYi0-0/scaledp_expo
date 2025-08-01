@@ -162,10 +162,11 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
         kwargs = dict(cfg.agent)
         kwargs.pop('ckpt_name')
         agent = fast_Expo.create_pixels(
-            cfg.seed,
-            cfg.shape_meta,
-            env.observation_space,
-            env.action_space,
+            seed=cfg.seed,
+            shape_meta=cfg.shape_meta,
+            accumulate_every=cfg.training.gradient_accumulate_every,
+            observation_space=env.observation_space,
+            action_space=env.action_space,
             **kwargs,
         )
         
@@ -198,7 +199,7 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                 else:
                     policy = self.model if cfg.training.use_ema else self.ema_model
                     policy.eval() 
-                    action, agent, _ = agent.on_the_fly(base_policy=policy, obs=observation)
+                    action, agent, _= agent.on_the_fly(base_policy=policy, obs=observation)
                     # Reshape action from (1, 1, 7) to (1, 7)
                     if isinstance(action, np.ndarray) and action.ndim == 3:
                         action = action.squeeze(0)  # Remove the middle dimension
@@ -232,10 +233,10 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                     policy.train()
                     
                     # Base policy update (finetuning)
-                    batch = dict_apply(mini_batch, lambda x: torch.from_numpy(x).to(device, non_blocking=True))
+                    # batch = dict_apply(mini_batch, lambda x: torch.from_numpy(x).to(device, non_blocking=True))
 
                     # compute loss
-                    raw_loss = self.model.compute_loss(batch)
+                    raw_loss = self.model.compute_loss(mini_batch)
                     loss = raw_loss / cfg.training.gradient_accumulate_every
                     loss.backward()
 

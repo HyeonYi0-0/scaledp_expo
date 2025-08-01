@@ -63,7 +63,7 @@ log_interval: 10000
 
 # Training settings
 utd_ratio: 20
-batch_size: 256
+batch_size: 64
 global_max_steps: 250000  # 5e5
 start_training: 0 # ${eval:'int(${batch_size}*${utd_ratio})'}  # 1e3
 
@@ -99,7 +99,7 @@ training:
   lr_scheduler: "cosine"
   lr_warmup_steps: 1000
   gradient_accumulate_every: 1
-  debug: False
+  debug: True
   resume: "data/outputs/2025.07.25/14.12.38_train_robomimic_image_square_image/checkpoints"
   ckpt_name: "epoch=0050-test_mean_score=0.840.ckpt"  # Name of the checkpoint to resume from
   num_cycles: 100
