@@ -97,7 +97,6 @@ class Temperature(nn.Module):
 class fast_Expo(Agent):
     def __init__(self,
                  shape_meta, 
-                 accumulate_every,
                  actor, 
                  critic, 
                  target_critic, 
@@ -119,7 +118,6 @@ class fast_Expo(Agent):
         
         super().__init__(actor, device)
         self.shape_meta = shape_meta
-        self.accumulate_every = accumulate_every
         self.actor_obs_encoder = actor_obs_encoder
         self.critic_obs_encoder = critic_obs_encoder
         self.critic = critic
@@ -237,7 +235,6 @@ class fast_Expo(Agent):
     def create_pixels(cls,
                seed: int,
                shape_meta: dict,
-               accumulate_every: int,
                observation_space: gym.Space,
                action_space: gym.Space,
                edit_policy_lr: float = 3e-4,
@@ -319,7 +316,6 @@ class fast_Expo(Agent):
         optimizer_temp = optim.Adam(temp.parameters(), lr=temp_lr)
 
         return cls(
-                  accumulate_every=accumulate_every,
                   shape_meta=shape_meta,
                   actor=actor, 
                   critic=critic,

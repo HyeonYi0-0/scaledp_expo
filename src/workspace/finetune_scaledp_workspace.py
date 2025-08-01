@@ -164,7 +164,6 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
         agent = fast_Expo.create_pixels(
             seed=cfg.seed,
             shape_meta=cfg.shape_meta,
-            accumulate_every=cfg.training.gradient_accumulate_every,
             observation_space=env.observation_space,
             action_space=env.action_space,
             **kwargs,
