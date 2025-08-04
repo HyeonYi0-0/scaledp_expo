@@ -289,20 +289,20 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                         if topk_ckpt_path is not None:
                             self.save_checkpoint(path=topk_ckpt_path)
 
-                        agent_ckpt_dir = os.path.join(os.path.dirname(topk_ckpt_path), "agent")
+                            agent_ckpt_dir = os.path.join(os.path.dirname(topk_ckpt_path), "agent")
 
-                        if not os.path.exists(agent_ckpt_dir):
-                            os.makedirs(agent_ckpt_dir, exist_ok=True)
-                        
-                        file_name = os.path.basename(topk_ckpt_path)
-                        name, _ = os.path.splitext(file_name)
-                        agent_ckpt_path = os.path.join(agent_ckpt_dir, f"{name}.pt")
-                        if not os.path.isfile(agent_ckpt_path): 
-                            torch.save({
-                                'agent_state_dict': agent.state_dict() if hasattr(agent, 'state_dict') else agent,
-                                'step': step_log['step'],
-                                'optimizer_state_dict': getattr(agent, 'optimizer', {}).state_dict() if hasattr(getattr(agent, 'optimizer', {}), 'state_dict') else {}
-                            }, agent_ckpt_path)
+                            if not os.path.exists(agent_ckpt_dir):
+                                os.makedirs(agent_ckpt_dir, exist_ok=True)
+                            
+                            file_name = os.path.basename(topk_ckpt_path)
+                            name, _ = os.path.splitext(file_name)
+                            agent_ckpt_path = os.path.join(agent_ckpt_dir, f"{name}.pt")
+                            if not os.path.isfile(agent_ckpt_path): 
+                                torch.save({
+                                    'agent_state_dict': agent.state_dict() if hasattr(agent, 'state_dict') else agent,
+                                    'step': step_log['step'],
+                                    'optimizer_state_dict': getattr(agent, 'optimizer', {}).state_dict() if hasattr(getattr(agent, 'optimizer', {}), 'state_dict') else {}
+                                }, agent_ckpt_path)
 
                     # ============ train Base policy =============
                     policy.train()

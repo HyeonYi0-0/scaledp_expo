@@ -504,8 +504,8 @@ class fast_Expo(Agent):
         actor_loss.backward()
         
         # Gradient clipping to prevent explosion
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
-        torch.nn.utils.clip_grad_norm_(self.actor_obs_encoder.parameters(), max_norm=1.0)
+        # torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
+        # torch.nn.utils.clip_grad_norm_(self.actor_obs_encoder.parameters(), max_norm=1.0)
         
         self.optimizer_actor.step()
         
@@ -582,8 +582,8 @@ class fast_Expo(Agent):
         total_critic_loss.backward()
         
         # Gradient clipping for critic networks
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
-        torch.nn.utils.clip_grad_norm_(self.critic_obs_encoder.parameters(), max_norm=1.0)
+        # torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
+        # torch.nn.utils.clip_grad_norm_(self.critic_obs_encoder.parameters(), max_norm=1.0)
         
         self.optimizer_critic.step()
         
