@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.distributions as dist
 from torch.distributions import Normal as TorchNormal, Independent, TransformedDistribution
 from torch.distributions.transforms import TanhTransform
+from torch.nn import functional as F
 
 def default_init():
     return nn.init.xavier_uniform_
@@ -33,7 +34,7 @@ class Normal(nn.Module):
     def __init__(self, 
                  base_cls: Type[nn.Module],
                  action_dim: int,
-                 log_std_min: Optional[float] = -20,
+                 log_std_min: Optional[float] = -2,
                  log_std_max: Optional[float] = 2,
                  state_dependent_std: bool = True,
                  squash_tanh: bool = False):
@@ -90,7 +91,8 @@ class Normal(nn.Module):
 
         log_stds = torch.clamp(log_stds, self.log_std_min, self.log_std_max)
 
-        distribution = Independent(TorchNormal(loc=means, scale=torch.exp(log_stds)), 1)
+        std = F.softplus(log_stds) + 1e-6
+        distribution = Independent(TorchNormal(loc=means, scale=std), 1)
 
         if self.squash_tanh:
             return TanhTransformedDistribution(distribution)
