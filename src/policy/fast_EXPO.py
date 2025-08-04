@@ -462,14 +462,15 @@ class fast_Expo(Agent):
         best_dist = dists[(best_idx%self.n_samples)]
         
         best = None
+        eps = 1e-6
         if sub_obs is None:
-            best = np.clip(best_action.cpu().numpy(), -1.0, 1.0)
+            best = np.clip(best_action.cpu().numpy(), -1.0+eps, 1.0-eps)
         else:
-            best = torch.clamp(best_action, -1.0, 1.0)
+            best = torch.clamp(best_action, -1.0+eps, 1.0-eps)
 
         return best, self, best_dist
 
-    def update_actor(self, batch: DatasetDict) -> Tuple['Expo', Dict[str, float]]:
+    def update_actor(self, batch: DatasetDict) -> Tuple['fast_Expo', Dict[str, float]]:
         observations = batch["observations"]
         actions = batch["actions"]
         base_obs_np = batch["base_obs"]
@@ -480,14 +481,16 @@ class fast_Expo(Agent):
         # Sample actions from current policy
         obs_feature = self.actor_obs_encoder(observations)
         obs_feature = obs_feature.reshape(B, To, -1)
+        
         edit_actions, dist = _sample_actions(self.actor, obs_feature, actions, clip_beta=self.clip_beta)
+        
         log_probs = dist.log_prob(edit_actions)
         
         # Get Q-values from all critics
         q_values = []
         encoded_obs = self.critic_obs_encoder(observations).reshape(B, To, -1)
         for critic_net in self.critic.networks:
-            q_val = critic_net(encoded_obs, (actions + edit_actions))
+            q_val = critic_net(encoded_obs, (actions + edit_actions))  
             q_values.append(q_val)
         
         # Average Q-values
@@ -495,17 +498,23 @@ class fast_Expo(Agent):
         
         # Actor loss: maximize Q - temperature * log_prob
         temperature = self.temp()
+        
         actor_loss = (temperature * log_probs - q_values).mean()
         
         actor_loss.backward()
+        
+        # Gradient clipping to prevent explosion
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(self.actor_obs_encoder.parameters(), max_norm=1.0)
+        
         self.optimizer_actor.step()
         
         return self, {
             "edit_loss": actor_loss.item(),
-            "entropy": -log_probs.mean().item()
+            "entropy": -log_probs.mean().item(),
         }
 
-    def update_temperature(self, entropy: float) -> Tuple['Expo', Dict[str, float]]:
+    def update_temperature(self, entropy: float) -> Tuple['fast_Expo', Dict[str, float]]:
         self.optimizer_temp.zero_grad()
         
         temperature = self.temp()
@@ -519,7 +528,7 @@ class fast_Expo(Agent):
             "temperature_loss": temp_loss.item()
         }
 
-    def update_critic(self, policy, batch: DatasetDict) -> Tuple['Expo', Dict[str, float]]:
+    def update_critic(self, policy, batch: DatasetDict) -> Tuple['fast_Expo', Dict[str, float]]:
         observations = batch["observations"]
         next_observations = batch["next_observations"]
         actions = batch["actions"]
@@ -542,7 +551,7 @@ class fast_Expo(Agent):
             for target_critic_net in critics_to_use:
                 target_q = target_critic_net(encoded_next_obs, next_actions)
                 target_q_values.append(target_q)
-            
+
             target_q = torch.stack(target_q_values, dim=0).max(dim=0)[0]
             
             # Compute target
@@ -551,6 +560,9 @@ class fast_Expo(Agent):
             target_q = rewards + self.discount * masks * target_q
             
             if self.backup_entropy:
+                # Mistake: next_dist should be the distribution of edit actions(a^) not next_actions(a+a^)
+                # Backup entropy must be False for this to work correctly
+                # TODO: Fix this in the future
                 next_log_probs = next_dist.log_prob(next_actions)
                 temperature = self.temp()
                 target_q -= self.discount * masks * temperature * next_log_probs
@@ -566,7 +578,13 @@ class fast_Expo(Agent):
             q_predictions.append(q_pred)
         
         total_critic_loss = sum(critic_losses)
+        
         total_critic_loss.backward()
+        
+        # Gradient clipping for critic networks
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(self.critic_obs_encoder.parameters(), max_norm=1.0)
+        
         self.optimizer_critic.step()
         
         # Soft update target networks
@@ -611,12 +629,10 @@ class fast_Expo(Agent):
                 'next_base_obs': {k: v[start_idx:end_idx] for k, v in next_base_obs.items()},
             })
         
-        print("Updating critic networks...")
         # 3. Critic 업데이트를 배치로 처리 (tqdm 제거)
         for mini_batch in mini_batches: 
             new_agent, critic_info = new_agent.update_critic(policy, mini_batch)
         
-        print("Updating actor and temperature...")
         # Update actor once
         new_agent, actor_info = new_agent.update_actor(mini_batches[-1])
         # Update temperature once

@@ -62,11 +62,12 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
         self.optimizer = self.model.get_optimizer(**cfg.optimizer)
         
         if cfg.training.debug:
-            cfg.start_training = 1
-            cfg.global_max_steps = 2
+            cfg.start_training = 0
+            cfg.global_max_steps = 1
             cfg.training.rollout_every = 1
             cfg.training.checkpoint_every = 1
             cfg.utd_ratio = 1
+            cfg.log_interval = 1
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -190,7 +191,7 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
             step_log = dict()
             train_losses = list()
             for i in tqdm.tqdm(
-                range(1, cfg.global_max_steps // action_repeat + 1),
+                range(0, cfg.global_max_steps // action_repeat),
                 smoothing=0.1,
             ):
                 if i < cfg.start_training:
@@ -253,9 +254,8 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                     raw_loss_cpu = raw_loss.item()
                     train_losses.append(raw_loss_cpu)
                     step_log = {
-                        'base/train_loss': raw_loss_cpu,
-                        'base/lr': lr_scheduler.get_last_lr()[0],
-                        'step': i * action_repeat,
+                        'base_lr': lr_scheduler.get_last_lr()[0],
+                        "step": i * action_repeat,
                     }
 
                     # ============ evaluate Base policy =============
@@ -268,6 +268,7 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                         runner_log = env_runner.run(policy)
                         # log all
                         step_log.update(runner_log)
+                        wandb_run.log(step_log, step=step_log['step'])
                     
                     # checkpoint
                     if (i % cfg.training.checkpoint_every) == 0:
@@ -299,7 +300,7 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                         if not os.path.isfile(agent_ckpt_path): 
                             torch.save({
                                 'agent_state_dict': agent.state_dict() if hasattr(agent, 'state_dict') else agent,
-                                'step': i * action_repeat,
+                                'step': step_log['step'],
                                 'optimizer_state_dict': getattr(agent, 'optimizer', {}).state_dict() if hasattr(getattr(agent, 'optimizer', {}), 'state_dict') else {}
                             }, agent_ckpt_path)
 
@@ -309,17 +310,31 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                     if i % cfg.log_interval == 0:
                         # replace train_loss with log_interval average
                         train_loss = np.mean(train_losses)
-                        step_log['base/train_loss'] = train_loss
+                        step_log['base_train_loss'] = train_loss
 
                         # agent logging
                         for k, v in update_info.items():
-                            step_log[f"agent/{k}"] = v
+                            if isinstance(v, dict):
+                                for sub_k, sub_v in v.items():
+                                    step_log[f"agent_{k}_{sub_k}"] = sub_v
+                            else:
+                                step_log[f"agent_{k}"] = v
+                        
+                        for k, v in step_log.items():
+                            if v is None:
+                                print(f"Warning: {k} is None, removing from step_log")
+                                step_log.pop(k)
+                        
+                        keys = list(step_log.keys())
+                        for i in range(0, len(keys), 20):
+                            sliced_dict = {k: step_log[k] for k in keys[i:i+20]}
+                            wandb_run.log(sliced_dict, step=step_log['step'])
+
+                        # wandb_run.log(step_log, step=step_log['step'])
+                        json_logger.log(step_log)
                         
                         step_log = dict()
                         train_losses = list()
-
-                        wandb_run.log(step_log, step=(i*action_repeat))
-                        json_logger.log(step_log)
 
 @hydra.main(
     version_base=None,
