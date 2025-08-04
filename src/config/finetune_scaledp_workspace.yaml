@@ -49,6 +49,7 @@ policy:
   obs_encoder_group_norm: True
   eval_fixed_crop: True
   obs_as_cond: ${obs_as_cond}
+  pred_action_steps_only: False  # Only predict action steps, not the full trajectory
 
 ema:
   _target_: src.model.diffusion.ema_model.EMAModel
@@ -59,10 +60,10 @@ ema:
   update_after_step: 0
 
 # log settings
-log_interval: 10000
+log_interval: 50
 
 # Training settings
-utd_ratio: 20
+utd_ratio: 10
 batch_size: 64
 global_max_steps: 250000  # 5e5
 start_training: 0 # ${eval:'int(${batch_size}*${utd_ratio})'}  # 1e3
@@ -79,7 +80,7 @@ agent:
   hidden_dims: [256, 256, 256]
   discount: 0.99
   clip_beta: 0.1
-  n_samples: 8
+  n_samples: 4
   tau: 0.005
   num_qs: 10
   num_min_qs: 2
@@ -87,7 +88,7 @@ agent:
   critic_layer_norm: false
   target_entropy: null
   init_temperature: 1.0
-  backup_entropy: true
+  backup_entropy: false
   ckpt_name: "agent_ckpt.pth"
   device: "cuda:1"  # or "cuda"
 
@@ -97,14 +98,14 @@ training:
   device: "cuda:1"  # or "cuda"
   use_ema: True
   lr_scheduler: "cosine"
-  lr_warmup_steps: 1000
+  lr_warmup_steps: 100
   gradient_accumulate_every: 1
-  debug: True
+  debug: False
   resume: "data/outputs/2025.07.25/14.12.38_train_robomimic_image_square_image/checkpoints"
   ckpt_name: "epoch=0050-test_mean_score=0.840.ckpt"  # Name of the checkpoint to resume from
   num_cycles: 100
-  rollout_every: 10000       # 단위: step
-  checkpoint_every: 10000    # 단위: step
+  rollout_every: 100       # 단위: step
+  checkpoint_every: 100    # 단위: step
 
 # Checkpointing
 checkpoint:
