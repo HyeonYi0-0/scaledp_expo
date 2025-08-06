@@ -268,7 +268,6 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                         runner_log = env_runner.run(policy)
                         # log all
                         step_log.update(runner_log)
-                        wandb_run.log(step_log, step=step_log['step'])
                     
                     # checkpoint
                     if (i % cfg.training.checkpoint_every) == 0:
@@ -325,12 +324,13 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                                 print(f"Warning: {k} is None, removing from step_log")
                                 step_log.pop(k)
                         
-                        keys = list(step_log.keys())
-                        for i in range(0, len(keys), 20):
-                            sliced_dict = {k: step_log[k] for k in keys[i:i+20]}
-                            wandb_run.log(sliced_dict, step=step_log['step'])
+                        # keys = list(step_log.keys())
+                        # print(len(keys))
+                        # for i in range(0, len(keys), 10):
+                        #     sliced_dict = {k: step_log[k] for k in keys[i:i+10]}
+                        #     wandb_run.log(sliced_dict)
 
-                        # wandb_run.log(step_log, step=step_log['step'])
+                        wandb_run.log(step_log)
                         json_logger.log(step_log)
                         
                         step_log = dict()
