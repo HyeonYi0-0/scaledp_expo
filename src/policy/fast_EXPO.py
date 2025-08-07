@@ -471,15 +471,17 @@ class fast_Expo(Agent):
         return best, self, best_dist
 
     def update_actor(self, batch: DatasetDict) -> Tuple['fast_Expo', Dict[str, float]]:
-        observations = batch["observations"]
+        # observations = batch["observations"]
         actions = batch["actions"]
         base_obs_np = batch["base_obs"]
+        encoded_actor_obs = batch["encoded_actor_obs"]
+        encoded_obs = batch["encoded_obs"]
         B, To = next(iter(base_obs_np.values())).shape[:2]
         
         self.optimizer_actor.zero_grad()
         
         # Sample actions from current policy
-        obs_feature = self.actor_obs_encoder(observations)
+        obs_feature = encoded_actor_obs
         obs_feature = obs_feature.reshape(B, To, -1)
         
         edit_actions, dist = _sample_actions(self.actor, obs_feature, actions, clip_beta=self.clip_beta)
@@ -488,7 +490,7 @@ class fast_Expo(Agent):
         
         # Get Q-values from all critics
         q_values = []
-        encoded_obs = self.critic_obs_encoder(observations).reshape(B, To, -1)
+        encoded_obs = encoded_obs.reshape(B, To, -1)
         for critic_net in self.critic.networks:
             q_val = critic_net(encoded_obs, (actions + edit_actions))  
             q_values.append(q_val)
@@ -529,12 +531,14 @@ class fast_Expo(Agent):
         }
 
     def update_critic(self, policy, batch: DatasetDict) -> Tuple['fast_Expo', Dict[str, float]]:
-        observations = batch["observations"]
+        # observations = batch["observations"]
         next_observations = batch["next_observations"]
         actions = batch["actions"]
         rewards = batch["rewards"]
         masks = batch["masks"]
         next_base_obs = batch["next_base_obs"]
+        encoded_obs = batch["encoded_obs"]
+        encoded_next_obs = batch["encoded_next_obs"]
         
         B, To = next(iter(next_base_obs.values())).shape[:2]
         
@@ -547,7 +551,7 @@ class fast_Expo(Agent):
             # Get target Q-values (use subset for REDQ if specified)
             target_q_values = []
             critics_to_use = subsample_ensemble(self.target_critic.networks, self.num_min_qs, self.num_qs, device=self.device)
-            encoded_next_obs = self.critic_obs_encoder(next_observations).reshape(B, To, -1)
+            encoded_next_obs = encoded_next_obs.reshape(B, To, -1)
             for target_critic_net in critics_to_use:
                 target_q = target_critic_net(encoded_next_obs, next_actions)
                 target_q_values.append(target_q)
@@ -570,7 +574,7 @@ class fast_Expo(Agent):
         # Compute critic loss
         critic_losses = []
         q_predictions = []
-        encoded_obs = self.critic_obs_encoder(observations).reshape(B, To, -1)
+        encoded_obs = encoded_obs.reshape(B, To, -1)
         for critic_net in self.critic.networks:
             q_pred = critic_net(encoded_obs, actions)
             critic_loss = F.mse_loss(q_pred, target_q)
@@ -590,8 +594,9 @@ class fast_Expo(Agent):
         # Soft update target networks
         with torch.no_grad():
             for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
-                target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
-        
+                # target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+                target_param.data.copy_((1 - self.tau) * param.data + self.tau * target_param.data)
+
         return self, {
             "critic_loss": total_critic_loss.item(),
             "q": torch.stack(q_predictions, dim=0).mean().item()
@@ -613,6 +618,10 @@ class fast_Expo(Agent):
         rewards = torch.from_numpy(batch["rewards"]).float().to(self.device)
         masks = torch.from_numpy(batch["masks"]).float().to(self.device)
         
+        encoded_obs = self.critic_obs_encoder(edit_obs)
+        encoded_next_obs = self.critic_obs_encoder(next_edit_obs)
+        encoded_actor_obs = self.actor_obs_encoder(edit_obs)
+        
         # 2. 전체 배치를 UTD ratio만큼 분할하여 병렬 처리
         batch_size = len(batch["actions"]) // utd_ratio
         mini_batches = []
@@ -627,6 +636,9 @@ class fast_Expo(Agent):
                 'masks': masks[start_idx:end_idx],
                 'base_obs': {k: v[start_idx:end_idx] for k, v in base_obs.items()},
                 'next_base_obs': {k: v[start_idx:end_idx] for k, v in next_base_obs.items()},
+                'encoded_obs': encoded_obs[start_idx:end_idx],
+                'encoded_next_obs': encoded_next_obs[start_idx:end_idx],
+                'encoded_actor_obs': encoded_actor_obs[start_idx:end_idx],
             })
         
         # 3. Critic 업데이트를 배치로 처리 (tqdm 제거)
