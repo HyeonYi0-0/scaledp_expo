@@ -10,7 +10,7 @@ pretrain.sh
 finetune.sh
 memo.txt
 test/
-nohup.out
+*.out
 
 **/.DS_Store
 
