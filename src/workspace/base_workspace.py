@@ -32,7 +32,7 @@ class BaseWorkspace:
         """
         pass
 
-    def save_checkpoint(self, path=None, tag='latest', 
+    def save_checkpoint(self, agent=None, step_log=None, path=None, tag='latest', 
             exclude_keys=None,
             include_keys=None,
             use_thread=True):
@@ -68,6 +68,23 @@ class BaseWorkspace:
             self._saving_thread.start()
         else:
             torch.save(payload, path.open('wb'), pickle_module=dill)
+        
+        if agent is not None and step_log is not None:
+            agent_ckpt_dir = os.path.join(os.path.dirname(path), "agent")
+
+            if not os.path.exists(agent_ckpt_dir):
+                os.makedirs(agent_ckpt_dir, exist_ok=True)
+            
+            file_name = os.path.basename(path)
+            name, _ = os.path.splitext(file_name)
+            agent_ckpt_path = os.path.join(agent_ckpt_dir, f"{name}.pt")
+            if not os.path.isfile(agent_ckpt_path): 
+                torch.save({
+                    'agent_state_dict': agent.state_dict() if hasattr(agent, 'state_dict') else agent,
+                    'step': step_log['step'],
+                    # 'optimizer_state_dict': getattr(agent, 'optimizer', {}).state_dict() if hasattr(getattr(agent, 'optimizer', {}), 'state_dict') else {}
+                }, agent_ckpt_path)
+                
         return str(path.absolute())
     
     def get_checkpoint_path(self, tag='latest'):
