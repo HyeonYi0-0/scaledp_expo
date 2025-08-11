@@ -469,7 +469,7 @@ class Expo(Agent):
         # clip best_action to [-1, 1]
         best_action = np.clip(best_action, -1.0, 1.0)
         
-        return best_action, self, best_dist
+        return best_action, self
 
     def update_actor(self, batch: DatasetDict) -> Tuple['Expo', Dict[str, float]]:
         base_obs_np, obs_np = get_real_obs_dict(env_obs=dict(batch["observations"]), shape_meta=self.shape_meta)
@@ -538,7 +538,7 @@ class Expo(Agent):
         
         with torch.no_grad():
             # Sample next actions from policy
-            next_actions, _, next_dist = self.on_the_fly(base_policy=policy, obs=batch["next_observations"])
+            next_actions, _ = self.on_the_fly(base_policy=policy, obs=batch["next_observations"])
             next_actions = torch.from_numpy(next_actions).float().to(self.device)
             
             # Get target Q-values (use subset for REDQ if specified)
