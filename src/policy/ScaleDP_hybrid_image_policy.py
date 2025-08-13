@@ -381,8 +381,8 @@ class ScaleDiffusionTransformerHybridImagePolicy(BaseImagePolicy):
         # Predict the noise residual
         pred = self.model(noisy_trajectory, timesteps, cond)
         
-        # B, horizon, Da -> B, n_action_steps, Da 
-        pred = pred[:, :self.n_action_steps, :]
+        # # B, horizon, Da -> B, n_action_steps, Da 
+        # pred = pred[:, :self.n_action_steps, :]
 
         pred_type = self.noise_scheduler.config.prediction_type 
         if pred_type == 'epsilon':
