@@ -2,6 +2,8 @@ import copy
 from typing import Iterable, Optional, Tuple, Any, Dict
 
 import gym
+import os
+import pickle
 import numpy as np
 from gym.spaces import Box
 from tqdm import tqdm
@@ -17,8 +19,17 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
         action_space: gym.Space,
         capacity: int,
         pixel_keys: Tuple[str, ...] = ("pixels",),
+        save_dir: str = "./data/online/save",
+        save_interval: int = 100,
+        start_training: int = 5000,
     ):
         self.pixel_keys = pixel_keys
+        self.save_dir = save_dir
+        self.save_interval = save_interval
+        self._insert_count = 0
+        self._start_training = start_training
+
+        os.makedirs(self.save_dir, exist_ok=True)
 
         observation_space = copy.deepcopy(observation_space)
         self._num_stack = None
@@ -53,6 +64,8 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
         )
 
     def insert(self, data_dict: DatasetDict):
+        self._insert_count += 1
+        
         if self._insert_index == 0 and self._capacity == len(self) and not self._first:
             indxs = np.arange(len(self) - self._num_stack, len(self))
             for indx in indxs:
@@ -99,6 +112,39 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
         for i in range(self._num_stack):
             indx = (self._insert_index + i) % len(self)
             self._is_correct_index[indx] = False
+        
+        # auto save
+        if (self._start_training >= 0) and (self._insert_count >= self._start_training) and (self._insert_count % self.save_interval) == 0:
+            self.save_to_pickle()
+            
+    def save_to_pickle(self):
+        filename = os.path.join(self.save_dir, f"replay_buffer_{len(self)}.pkl")
+        state = {
+            "dataset_dict": self.dataset_dict,
+            "_size": self._size,
+            "_capacity": self._capacity,
+            "_insert_index": self._insert_index,
+            "_is_correct_index": self._is_correct_index,
+            "_first": self._first,
+            "pixel_keys": self.pixel_keys,
+            "_num_stack": self._num_stack,
+        }
+        with open(filename, "wb") as f:
+            pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"[Online Replay Buffer] Saved {filename}")
+
+    def load_from_pickle(self, filename: str):
+        with open(filename, "rb") as f:
+            state = pickle.load(f)
+        self.dataset_dict = state["dataset_dict"]
+        self._size = state["_size"]
+        self._capacity = state["_capacity"]
+        self._insert_index = state["_insert_index"]
+        self._is_correct_index = state["_is_correct_index"]
+        self._first = state["_first"]
+        self.pixel_keys = state["pixel_keys"]
+        self._num_stack = state["_num_stack"]
+        print(f"[Online Replay Buffer] Resumed from {filename}")
 
     def sample(
         self,
