@@ -51,6 +51,23 @@ def _eval_actions(actor_network, observations: torch.Tensor, actions: torch.Tens
                     actions = torch.tanh(actions)
     return actions
 
+def to_tensor(v, device):
+    return torch.as_tensor(v, dtype=torch.float32).pin_memory().to(device=device, non_blocking=True)
+
+def _prepare_batch(batch, base_np, edit_np, next_base_np, next_edit_np, i, batch_size, device):
+    start_idx = batch_size * i
+    end_idx   = batch_size * (i + 1)
+
+    return {
+        "observations": {k: to_tensor(v[start_idx:end_idx], device) for k, v in edit_np.items()},
+        "next_observations": {k: to_tensor(v[start_idx:end_idx], device) for k, v in next_edit_np.items()},
+        "base_obs": {k: to_tensor(v[start_idx:end_idx], device) for k, v in base_np.items()},
+        "next_base_obs": {k: to_tensor(v[start_idx:end_idx], device) for k, v in next_base_np.items()},
+        "actions": to_tensor(batch["actions"][i], device),
+        "rewards": to_tensor(batch["rewards"][i], device),
+        "masks":   to_tensor(batch["masks"][i], device)
+    }
+
 class Agent:
     def __init__(self, actor, device='cpu'):
         self.actor = actor
@@ -159,13 +176,13 @@ class fast_Expo(Agent):
             shape = attr['shape']
             obs_key_shapes[key] = list(shape)
 
-            type = attr.get('type', 'low_dim')
-            if type == 'rgb':
+            _type = attr.get('type', 'low_dim')
+            if _type == 'rgb':
                 obs_config['rgb'].append(key)
-            elif type == 'low_dim':
+            elif _type == 'low_dim':
                 obs_config['low_dim'].append(key)
             else:
-                raise RuntimeError(f"Unsupported obs type: {type}")
+                raise RuntimeError(f"Unsupported obs type: {_type}")
 
         # get raw robomimic config
         config = get_robomimic_config(
@@ -422,8 +439,8 @@ class fast_Expo(Agent):
         # 1) obs의 value가 numpy인 경우
         if sub_obs is None:
             np_obs_dict, edit_obs_dict = get_real_obs_dict(env_obs=obs, shape_meta=self.shape_meta)
-            base_obs = {k: torch.from_numpy(v).to(device=self.device) for k, v in np_obs_dict.items()}
-            edit_obs = {k: torch.from_numpy(v).float().to(self.device) for k, v in edit_obs_dict.items()}
+            base_obs = {k: to_tensor(v, device=self.device) for k, v in np_obs_dict.items()}
+            edit_obs = {k: to_tensor(v, device=self.device) for k, v in edit_obs_dict.items()}
         else:
             base_obs = obs
             edit_obs = sub_obs
@@ -438,13 +455,13 @@ class fast_Expo(Agent):
         obs_feat = self.actor_obs_encoder(edit_obs).reshape(self.n_samples, B, To, -1) # [n_samples, B, To, obs_feat_dim]
         base_action = action_base.reshape(self.n_samples, B, To, -1)  # [n_samples, B, To, action_dim]
         
-        delta_actions = []
-        dists = []
-        for feature, action in zip(obs_feat, base_action):
-            delta_action, dist = _sample_actions(self.actor, feature, action, clip_beta=self.clip_beta)
-            delta_actions.append(delta_action)
-            dists.append(dist)
-        delta_actions = torch.stack(delta_actions, dim=0).reshape(self.n_samples*B, To, -1)  # [n_samples*B, To, action_dim]
+        # delta_actions = []
+        # for feature, action in zip(obs_feat, base_action):
+        #     delta_action, _ = _sample_actions(self.actor, feature, action, clip_beta=self.clip_beta)
+        #     delta_actions.append(delta_action)
+        # delta_actions = torch.stack(delta_actions, dim=0).reshape(self.n_samples*B, To, -1)  # [n_samples*B, To, action_dim]
+        delta_actions, _ = _sample_actions(self.actor, obs_feat, base_action, clip_beta=self.clip_beta)
+        delta_actions = delta_actions.reshape(self.n_samples*B, To, -1)
         edited_actions = action_base + delta_actions  # shape: [n_samples*B, To, action_dim]
         actions = torch.cat([edited_actions, action_base], dim=0)  # [2*n_samples*B, To, action_dim]
 
@@ -453,6 +470,7 @@ class fast_Expo(Agent):
         critics = subsample_ensemble(self.target_critic.networks, self.num_min_qs, self.num_qs, device=self.device)
         qs = torch.stack([net(encoded_obs, actions) for net in critics], dim=0)
         target_Q, _ = qs.min(dim=0)
+        
         # target_Q = target_Q.reshape(self.n_samples*2, B, -1)
         # best_idx = target_Q.mean(dim=1).argmax()
         target_Q = target_Q.reshape(B, self.n_samples*2, -1) # [B, 2*n_samples, 1]
@@ -539,7 +557,6 @@ class fast_Expo(Agent):
         rewards = batch["rewards"]
         masks = batch["masks"]
         next_base_obs = batch["next_base_obs"]
-        encoded_next_obs = batch["encoded_next_obs"]
         
         B, To = next(iter(next_base_obs.values())).shape[:2]
         
@@ -552,12 +569,18 @@ class fast_Expo(Agent):
             # Get target Q-values (use subset for REDQ if specified)
             target_q_values = []
             critics_to_use = subsample_ensemble(self.target_critic.networks, self.num_min_qs, self.num_qs, device=self.device)
-            encoded_next_obs = encoded_next_obs.reshape(B, To, -1)
+            encoded_next_obs = self.critic_obs_encoder(next_observations).reshape(B, To, -1)
             for target_critic_net in critics_to_use:
                 target_q = target_critic_net(encoded_next_obs, next_actions)
                 target_q_values.append(target_q)
+                
+            # target_q_values = torch.stack([
+            #     critic(encoded_next_obs, next_actions)
+            #     for critic in critics_to_use
+            # ], dim=0)
 
             target_q = torch.stack(target_q_values, dim=0).min(dim=0)[0]
+            # target_q = target_q_values.min(dim=0)[0]
             
             # Compute target
             rewards = rewards.view(B, 1)
@@ -603,56 +626,89 @@ class fast_Expo(Agent):
             "critic_loss": total_critic_loss.item(),
             "q": torch.stack(q_predictions, dim=0).mean().item()
         }
+        
+    def merge_batch(self, online_data, offline_data, batch_size=128, utd_ratio=20):
+        merged_batch = {}
+
+        def merge(a, b):
+            a_reshaped = a.reshape(utd_ratio, batch_size, *a.shape[1:])
+            b_reshaped = b.reshape(utd_ratio, batch_size, *b.shape[1:])
+            return np.stack([a_reshaped, b_reshaped], axis=1).reshape(utd_ratio, batch_size * 2, *a.shape[1:])
+
+        for k, v in online_data.items():
+            if isinstance(v, dict):
+                merged_batch[k] = {sub_k: merge(v[sub_k], offline_data[k][sub_k]) for sub_k in v.keys()}
+            else:
+                merged_batch[k] = merge(v, offline_data[k])
+
+        return merged_batch
     
-    def update(self, policy, batch: DatasetDict, utd_ratio: int):
+    
+
+    def update(self, policy, online_data: DatasetDict, offline_data: DatasetDict, utd_ratio: int):
         new_agent = self
         
-        # 1. 관찰값 인코딩을 한 번만 수행
-        base_np, edit_np = get_real_obs_dict(env_obs=dict(batch["observations"]), shape_meta=self.shape_meta)
-        edit_obs = dict_apply(edit_np, lambda x: torch.from_numpy(x).float().to(self.device))
-        base_obs = dict_apply(base_np, lambda x: torch.from_numpy(x).float().to(self.device))
-        
-        next_base_np, next_edit_np = get_real_obs_dict(env_obs=dict(batch["next_observations"]), shape_meta=self.shape_meta)
-        next_edit_obs = dict_apply(next_edit_np, lambda x: torch.from_numpy(x).float().to(self.device))
-        next_base_obs = dict_apply(next_base_np, lambda x: torch.from_numpy(x).float().to(self.device))
-        
-        actions = torch.from_numpy(batch["actions"]).float().to(self.device)
-        rewards = torch.from_numpy(batch["rewards"]).float().to(self.device)
-        masks = torch.from_numpy(batch["masks"]).float().to(self.device)
-        
-        # encoded_obs = self.critic_obs_encoder(edit_obs)
-        encoded_next_obs = self.critic_obs_encoder(next_edit_obs)
-        
-        # 2. 전체 배치를 UTD ratio만큼 분할하여 병렬 처리
-        batch_size = len(batch["actions"]) // utd_ratio
-        mini_batches = []
+        assert len(online_data["actions"]) % utd_ratio == 0, "Online data length must be divisible by utd_ratio"
+
+        batch_size = len(online_data["actions"]) // utd_ratio
+        batch = self.merge_batch(online_data, offline_data, batch_size=batch_size, utd_ratio=utd_ratio)
+
+        batch["observations"] = dict_apply(batch["observations"], lambda x: x.reshape(-1, *x.shape[2:]))
+        batch["next_observations"] = dict_apply(batch["next_observations"], lambda x: x.reshape(-1, *x.shape[2:]))
+
+        base_np, edit_np = get_real_obs_dict(env_obs=batch["observations"], shape_meta=self.shape_meta)
+        next_base_np, next_edit_np = get_real_obs_dict(env_obs=batch["next_observations"], shape_meta=self.shape_meta)
+
+        # observations = {k: to_tensor(v, self.device) for k, v in edit_np.items()}
+
+        # stream_transfer = torch.cuda.Stream(device=self.device)
+        # stream_compute = torch.cuda.current_stream(device=self.device)
+
+        # GPU에 미리 올린 데이터 저장 공간
+        # gpu_batches = [None] * utd_ratio
+
+        batch_size *= 2
+        # 1. 먼저 첫 번째 배치를 전송 시작
+        # with torch.cuda.stream(stream_transfer):
+        #     gpu_batches[0] = _prepare_batch(batch, base_np, edit_np, next_base_np, next_edit_np, 0, batch_size, self.device)
+
         for i in range(utd_ratio):
             start_idx = batch_size * i
             end_idx = batch_size * (i + 1)
-            mini_batches.append({
-                'observations': {k: v[start_idx:end_idx] for k, v in edit_obs.items()},
-                'next_observations': {k: v[start_idx:end_idx] for k, v in next_edit_obs.items()},
-                'actions': actions[start_idx:end_idx],
-                'rewards': rewards[start_idx:end_idx],
-                'masks': masks[start_idx:end_idx],
-                'base_obs': {k: v[start_idx:end_idx] for k, v in base_obs.items()},
-                'next_base_obs': {k: v[start_idx:end_idx] for k, v in next_base_obs.items()},
-                # 'encoded_obs': encoded_obs[start_idx:end_idx],
-                'encoded_next_obs': encoded_next_obs[start_idx:end_idx]
-            })
-        
-        # 3. Critic 업데이트를 배치로 처리 (tqdm 제거)
-        for mini_batch in mini_batches: 
+
+            mini_batch = {
+                "observations": {k: to_tensor(v[start_idx:end_idx], self.device) for k, v in edit_np.items()},
+                "next_observations": {k: to_tensor(v[start_idx:end_idx], self.device) for k, v in next_edit_np.items()},
+                "base_obs": {k: to_tensor(v[start_idx:end_idx], self.device) for k, v in base_np.items()},
+                "next_base_obs": {k: to_tensor(v[start_idx:end_idx], self.device) for k, v in next_base_np.items()},
+                "actions": to_tensor(batch['actions'][i], self.device),
+                "rewards": to_tensor(batch["rewards"][i], self.device),
+                "masks": to_tensor(batch["masks"][i], self.device)
+            }
+            
+            # mini_batch["actions"] = to_tensor(batch['actions'][i], self.device)
+            # mini_batch["rewards"] = to_tensor(batch["rewards"][i], self.device)
+            # mini_batch["masks"] = to_tensor(batch["masks"][i], self.device)
+            
+            # if i + 1 < utd_ratio:
+            #     with torch.cuda.stream(stream_transfer):
+            #         gpu_batches[i+1] = _prepare_batch(batch, base_np, edit_np, next_base_np, next_edit_np, i+1, batch_size, self.device)
+
+            # 현재 batch로 연산 실행 (기본 stream)
+            # stream_compute.wait_stream(stream_transfer)
+            # mini_batch = gpu_batches[i]
+            # mini_batch = _prepare_batch(batch, base_np, edit_np, next_base_np, next_edit_np, i, batch_size, self.device)
+
             new_agent, critic_info = new_agent.update_critic(policy, mini_batch)
         
         # Update actor once
-        new_agent, actor_info = new_agent.update_actor(mini_batches[-1])
+        new_agent, actor_info = new_agent.update_actor(mini_batch)
         # Update temperature once
         new_agent, temp_info = new_agent.update_temperature(actor_info["entropy"])
         
         batch = {
-            "obs": mini_batches[-1]["base_obs"],
-            "action": mini_batches[-1]["actions"],
+            "obs": mini_batch["base_obs"],
+            "action": mini_batch["actions"],
         }
 
         return new_agent, batch, {**actor_info, **critic_info, **temp_info}
@@ -673,9 +729,9 @@ class fast_Expo(Agent):
         """Load state dict"""
         self.actor.load_state_dict(state_dict['actor'])
         for i, net_state in enumerate(state_dict['critic']):
-            self.critic[i].load_state_dict(net_state)
+            self.critic.networks[i].load_state_dict(net_state)
         for i, net_state in enumerate(state_dict['target_critic']):
-            self.target_critic[i].load_state_dict(net_state)
+            self.target_critic.networks[i].load_state_dict(net_state)
         self.temp.load_state_dict(state_dict['temp'])
         self.optimizer_actor.load_state_dict(state_dict['optimizer_actor'])
         self.optimizer_critic.load_state_dict(state_dict['optimizer_critic'])
