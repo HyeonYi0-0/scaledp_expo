@@ -1,0 +1,123 @@
+defaults:
+  - _self_
+  - task: square_lowdim
+
+name: train_robomimic_lowdim
+_target_: src.workspace.pretrain_scaledp_lowdim_workspace.TrainScaleDPLowdimWorkspace
+
+obs_dim: ${task.obs_dim}
+action_dim: ${task.action_dim}
+transition_dim: "${eval: ${task.obs_dim} + ${task.action_dim}}"
+task_name: ${task.name}
+exp_name: "default"
+
+horizon: 1
+n_obs_steps: 1
+n_action_steps: 1
+seed: 42
+n_latency_steps: 0
+past_action_visible: False
+keypoint_visible_rate: 1.0
+obs_as_cond: True
+pred_action_steps_only: False
+
+policy:
+  _target_: src.policy.ScaleDP_lowdim_policy.ScaleDiffusionTransformerLowdimPolicy
+  action_dim: ${action_dim}
+  obs_dim: ${obs_dim}
+
+  # oc.select resolver: key, default
+  model_size: 'ScaleDP_B'       # ScaleDP model size -> 'ScaleDP_H', 'ScaleDP_L', 'ScaleDP_B', 'ScaleDP_S', 'ScaleDP_Ti'
+
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+    beta_end: 0.02
+    beta_schedule: squaredcos_cap_v2 
+    beta_start: 0.0001
+    clip_sample: true
+    num_train_timesteps: 100
+    prediction_type: epsilon
+    # variance_type: fixed_small
+
+  horizon: ${horizon}
+  n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
+  n_obs_steps: ${n_obs_steps}
+  num_inference_steps: 100
+  obs_as_cond: ${obs_as_cond}
+  pred_action_steps_only: ${pred_action_steps_only}
+
+ema:
+  _target_: src.model.diffusion.ema_model.EMAModel
+  inv_gamma: 1.0
+  max_value: 0.9999
+  min_value: 0.0
+  power: 0.75
+  update_after_step: 0
+
+dataloader:
+  batch_size: 256
+  num_workers: 1
+  shuffle: True
+  pin_memory: True
+  persistent_workers: False
+
+val_dataloader:
+  batch_size: 256
+  num_workers: 1
+  shuffle: False
+  pin_memory: True
+  persistent_workers: False
+
+training:
+  checkpoint_every: 20        # Model checkpoint saving interval
+  debug: False
+  device: cuda:0
+  gradient_accumulate_every: 1
+  lr_scheduler: cosine        # "cosine", "cosine_with_restarts", "constant_with_warmup", "polynomial", "linear"
+  lr_warmup_steps: 500
+  max_train_steps: null
+  max_val_steps: null
+  num_epochs: 500 # 3050     # Total number of training epochs
+  resume: true
+  rollout_every: 20     # Evaluation rollout interval
+  sample_every: 5
+  seed: ${seed}
+  tqdm_interval_sec: 1.0
+  use_ema: true
+  val_every: 1
+
+optimizer:
+  weight_decay: 1.0e-1
+  learning_rate: 1.0e-4
+  betas: [0.9, 0.99]
+
+logging:
+  project: pretrain_scaledp
+  resume: True
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "${exp_name}"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: test_mean_score
+    mode: max
+    k: 5
+    format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+
+multi_run:
+  run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  sweep:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    subdir: ${hydra.job.num}
