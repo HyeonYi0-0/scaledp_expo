@@ -87,6 +87,7 @@ class ReplayBuffer(Dataset):
         
         # auto save
         if auto_save:
+            self._insert_count += 1
             if (self._start_training >= 0) and (self._insert_count >= self._start_training) and (self._insert_count % self.save_interval) == 0:
                 self.save_to_pickle()
             
