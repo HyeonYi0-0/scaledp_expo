@@ -37,6 +37,8 @@ from src.common.pytorch_util import dict_apply, optimizer_to
 from src.model.diffusion.ema_model import EMAModel
 from src.model.common.lr_scheduler import get_scheduler
 
+import time
+
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 class finetuneScaleDPWorkspace(BaseWorkspace):
@@ -66,7 +68,7 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
             cfg.global_max_steps = 1
             cfg.training.rollout_every = 1
             cfg.training.checkpoint_every = 1
-            cfg.utd_ratio = 1
+            cfg.utd_ratio = 10
             cfg.log_interval = 1
 
     def run(self):
@@ -99,23 +101,53 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
         env.seed(cfg.seed)
 
         # configure RL replay buffer
-        replay_buffer_size = cfg.replay_buffer_size or cfg.global_max_steps // action_repeat
-        replay_buffer = MemoryEfficientReplayBuffer(
-            env.observation_space, env.action_space, replay_buffer_size, pixel_keys=("agentview_image", "robot0_eye_in_hand_image")
+        offline_replay_buffer_size = cfg.replay_buffer_size
+        offline_replay_buffer = MemoryEfficientReplayBuffer(
+            env.observation_space, env.action_space, offline_replay_buffer_size, pixel_keys=("agentview_image", "robot0_eye_in_hand_image"), 
+            start_training=-1, save_dir=cfg.offline_save_dir
         )
-        replay_buffer_iterator = replay_buffer.get_iterator(
+        offline_replay_buffer_iterator = offline_replay_buffer.get_iterator(
             sample_args={
-                "batch_size": cfg.batch_size * cfg.utd_ratio,
+                "batch_size": (cfg.batch_size // 2) * cfg.utd_ratio,
                 "pack_obs_and_next_obs": False,
             }
         )
-        replay_buffer.seed(cfg.seed)
-
-        replay_buffer.init_replay_buffer_from_demo_data(
-            demo_data=dataset.replay_buffer, 
-            pixel_keys=("agentview_image", "robot0_eye_in_hand_image")
+        offline_replay_buffer.seed(cfg.seed)
+        file_path = os.path.join(offline_replay_buffer.save_dir, cfg.offline_buffer_file_name)
+        if os.path.isfile(file_path):
+            offline_replay_buffer.load_from_pickle(file_path)
+            print(f"Loaded offline replay buffer from {file_path}")
+        else:
+            print(f"Offline replay buffer not found at {file_path}, starting from scratch.")
+            offline_replay_buffer.init_replay_buffer_from_demo_data(
+                demo_data=dataset.replay_buffer, 
+            )
+            offline_replay_buffer.save_to_pickle()
+        print(f"Replay buffer size: {len(offline_replay_buffer)}")
+        
+        online_replay_buffer_size = cfg.replay_buffer_size if cfg.training.debug else cfg.global_max_steps // action_repeat
+        online_replay_buffer = MemoryEfficientReplayBuffer(
+            env.observation_space, env.action_space, online_replay_buffer_size, pixel_keys=("agentview_image", "robot0_eye_in_hand_image"),
+            start_training=cfg.start_training, save_dir=cfg.online_save_dir, save_interval=cfg.save_interval
         )
-        print(f"Replay buffer size: {len(replay_buffer)}")
+        online_replay_buffer_iterator = online_replay_buffer.get_iterator(
+            sample_args={
+                "batch_size": (cfg.batch_size // 2) * cfg.utd_ratio,
+                "pack_obs_and_next_obs": False,
+            }
+        )
+        online_replay_buffer.seed(cfg.seed+1)
+        # if file exists
+        file_path = os.path.join(online_replay_buffer.save_dir, cfg.online_buffer_file_name)
+        if os.path.isfile(file_path):
+            online_replay_buffer.load_from_pickle(file_path)
+            print(f"Loaded online replay buffer from {file_path}")
+        else:
+            print(f"Online replay buffer not found at {file_path}, starting from scratch.")
+            # online_replay_buffer.init_replay_buffer_from_demo_data(
+            #     demo_data=dataset.replay_buffer, 
+            # )
+        print(f"Replay buffer size: {len(online_replay_buffer)}")
         
         # Set normalizer
         normalizer = dataset.get_normalizer()
@@ -170,11 +202,14 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
             **kwargs,
         )
         
+        start_step = 0
         if cfg.training.resume:
             agent_ckpt_path = pathlib.Path(cfg.training.resume, cfg.agent.ckpt_name)
             if os.path.isfile(agent_ckpt_path):
                 print(f"Loading agent from {agent_ckpt_path}")
-                agent.load_state_dict(torch.load(agent_ckpt_path)['agent_state_dict'])
+                checkpoint = torch.load(agent_ckpt_path)
+                start_step = checkpoint.get('step', 0)
+                agent.load_state_dict(checkpoint['agent_state_dict'])
             else:
                 print(f"Agent checkpoint not found at {agent_ckpt_path}, starting from scratch.")
 
@@ -190,24 +225,23 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
         with JsonLogger(log_path) as json_logger:
             step_log = dict()
             train_losses = list()
-            for i in tqdm.tqdm(
-                range(0, cfg.global_max_steps // action_repeat),
+            for step_t in tqdm.tqdm(
+                range(start_step, cfg.global_max_steps // action_repeat),
                 smoothing=0.1,
             ):
-                if i < cfg.start_training:
-                    action = env.action_space.sample()
-                else:
-                    policy = self.model if cfg.training.use_ema else self.ema_model
-                    policy.eval() 
-                    action, agent, _= agent.on_the_fly(base_policy=policy, obs=observation)
-                    # Reshape action from (1, 1, 7) to (1, 7)
-                    if isinstance(action, np.ndarray) and action.ndim == 3:
-                        action = action.squeeze(0)  # Remove the middle dimension
-                    policy.train()
+                policy = self.model if cfg.training.use_ema else self.ema_model
+                policy.eval() 
+                action, agent = agent.on_the_fly(base_policy=policy, obs=observation)
+                # Reshape action from (1, 1, 7) to (1, 7)
+                if isinstance(action, np.ndarray) and action.ndim == 3:
+                    action = action.squeeze(0)  # Remove the middle dimension
+                policy.train()
+                
                 next_observation, reward, done, info = env.step(action)
+                
                 mask = 1.0 if not done or "TimeLimit.truncated" in info else 0.0
 
-                replay_buffer.insert(
+                online_replay_buffer.insert(
                     dict(
                         observations=observation,
                         actions=action,
@@ -221,15 +255,19 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
 
                 if done:
                     observation, done = env.reset(), False
-                    # TODO: Check Validation
-                    # for k, v in info["episode"].items():
-                    #     decode = {"r": "return", "l": "length", "t": "time"}
-                    #     wandb.log({f"agent/{decode[k]}": v}, step=i * action_repeat)
-                if i >= cfg.start_training:
-                    batch = next(replay_buffer_iterator)
+
+                if step_t >= cfg.start_training:
+                    online_batch = next(online_replay_buffer_iterator)
+                    offline_batch = next(offline_replay_buffer_iterator)
                     policy = self.model if cfg.training.use_ema else self.ema_model
                     policy.eval()
-                    agent, mini_batch, update_info = agent.update(policy, batch, cfg.utd_ratio)
+                    # start_time = time.time()
+                    agent, mini_batch, update_info = agent.update(policy, 
+                                                                  online_data=online_batch, 
+                                                                  offline_data=offline_batch, 
+                                                                  utd_ratio=cfg.utd_ratio)
+                    # end_time = time.time()
+                    # print(f"Agent update time: {end_time - start_time:.4f} seconds")
                     policy.train()
                     
                     # Base policy update (finetuning)
@@ -241,7 +279,7 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                     loss.backward()
 
                     # step optimizer
-                    if i % cfg.training.gradient_accumulate_every == 0:
+                    if step_t % cfg.training.gradient_accumulate_every == 0:
                         self.optimizer.step()
                         self.optimizer.zero_grad()
                         lr_scheduler.step()
@@ -255,7 +293,7 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                     train_losses.append(raw_loss_cpu)
                     step_log = {
                         'base_lr': lr_scheduler.get_last_lr()[0],
-                        "step": i * action_repeat,
+                        "step": step_t * action_repeat,
                     }
 
                     # ============ evaluate Base policy =============
@@ -264,16 +302,16 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                         policy = self.ema_model
                     policy.eval()
 
-                    if (i % cfg.training.rollout_every) == 0:   
+                    if (step_t % cfg.training.rollout_every) == 0:   
                         runner_log = env_runner.run(policy)
                         # log all
                         step_log.update(runner_log)
                     
                     # checkpoint
-                    if (i % cfg.training.checkpoint_every) == 0:
+                    if (step_t % cfg.training.checkpoint_every) == 0:
                         # checkpointing
                         if cfg.checkpoint.save_last_ckpt:
-                            self.save_checkpoint()
+                            self.save_checkpoint(agent=agent, step_log=step_log)
                         if cfg.checkpoint.save_last_snapshot:
                             self.save_snapshot()
 
@@ -286,27 +324,12 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
                         topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
 
                         if topk_ckpt_path is not None:
-                            self.save_checkpoint(path=topk_ckpt_path)
-
-                            agent_ckpt_dir = os.path.join(os.path.dirname(topk_ckpt_path), "agent")
-
-                            if not os.path.exists(agent_ckpt_dir):
-                                os.makedirs(agent_ckpt_dir, exist_ok=True)
-                            
-                            file_name = os.path.basename(topk_ckpt_path)
-                            name, _ = os.path.splitext(file_name)
-                            agent_ckpt_path = os.path.join(agent_ckpt_dir, f"{name}.pt")
-                            if not os.path.isfile(agent_ckpt_path): 
-                                torch.save({
-                                    'agent_state_dict': agent.state_dict() if hasattr(agent, 'state_dict') else agent,
-                                    'step': step_log['step'],
-                                    'optimizer_state_dict': getattr(agent, 'optimizer', {}).state_dict() if hasattr(getattr(agent, 'optimizer', {}), 'state_dict') else {}
-                                }, agent_ckpt_path)
+                            self.save_checkpoint(agent=agent, step_log=step_log, path=topk_ckpt_path)
 
                     # ============ train Base policy =============
                     policy.train()
 
-                    if i % cfg.log_interval == 0:
+                    if step_t % cfg.log_interval == 0:
                         # replace train_loss with log_interval average
                         train_loss = np.mean(train_losses)
                         step_log['base_train_loss'] = train_loss
