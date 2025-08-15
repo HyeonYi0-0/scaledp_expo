@@ -366,3 +366,28 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             uaction = uaction.reshape(*raw_shape[:-1], 14)
 
         return uaction
+    
+    def get_environment(self):
+        env = EnvUtils.create_env_from_metadata(
+            env_meta=self.env_meta,
+            render=False, 
+            render_offscreen=False,
+            use_image_obs=False, 
+        )
+
+        robomimic_image_wrapper = RobomimicLowdimWrapper(
+            env=env,
+            obs_keys=[
+                'object', 
+                'robot0_eef_pos', 
+                'robot0_eef_quat', 
+                'robot0_gripper_qpos'
+            ]
+        )
+
+        return MultiStepWrapper(
+            robomimic_image_wrapper,
+            n_obs_steps=self.n_obs_steps,
+            n_action_steps=self.n_action_steps,
+            max_episode_steps=self.max_steps
+        )

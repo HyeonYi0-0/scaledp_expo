@@ -352,88 +352,7 @@ class fast_Expo(Agent):
                   num_min_qs=num_min_qs,
                   backup_entropy=backup_entropy,
                   device=device)
-
-    # @classmethod
-    # def create(cls,
-    #            seed: int,
-    #            observation_space: gym.Space,
-    #            action_space: gym.Space,
-    #            edit_policy_lr: float = 3e-4,
-    #            critic_lr: float = 3e-4,
-    #            temp_lr: float = 3e-4,
-    #            hidden_dims: Sequence[int] = (256, 256, 256),
-    #            discount: float = 0.99,
-    #            tau: float = 0.005,
-    #            num_qs: int = 2,
-    #            num_min_qs: Optional[int] = None,
-    #            critic_dropout_rate: Optional[float] = None,
-    #            critic_layer_norm: bool = False,
-    #            target_entropy: Optional[float] = None,
-    #            init_temperature: float = 1.0,
-    #            backup_entropy: bool = True,
-    #            device: str = 'cpu'):
-    #     """
-    #     PyTorch implementation of Soft-Actor-Critic
-    #     """
-    #     torch.manual_seed(seed)
-    #     np.random.seed(seed)
-
-    #     action_dim = action_space.shape[-1]
-    #     obs_dim = observation_space.shape[-1]
-
-    #     if target_entropy is None:
-    #         target_entropy = -action_dim / 2
-
-    #     # Create actor network  
-    #     actor_hidden_dims = [obs_dim] + list(hidden_dims)
-    #     actor_base_cls = partial(MLP, hidden_dims=actor_hidden_dims, activate_final=True)
-    #     actor = TanhNormal(actor_base_cls, action_dim).to(device)
-    #     optimizer_actor = optim.Adam(actor.parameters(), lr=edit_policy_lr)
-
-    #     # Create critic ensemble
-    #     critic_hidden_dims = list(hidden_dims)
-    #     critic_base_cls = partial(MLP, 
-    #                             activate_final=True,
-    #                             dropout_rate=critic_dropout_rate,
-    #                             use_layer_norm=critic_layer_norm)
         
-    #     critic_networks = []
-    #     for _ in range(num_qs):
-    #         critic_net = StateActionValue(critic_base_cls, 
-    #                                     input_dim=obs_dim + action_dim,
-    #                                     hidden_dims=critic_hidden_dims).to(device)
-    #         critic_networks.append(critic_net)
-        
-    #     critic = nn.ModuleList(critic_networks)
-        
-    #     # Create target critic (deep copy)
-    #     target_critic = copy.deepcopy(critic)
-        
-    #     # Create optimizers
-    #     critic_params = []
-    #     for net in critic:
-    #         critic_params.extend(net.parameters())
-    #     optimizer_critic = optim.Adam(critic_params, lr=critic_lr)
-
-    #     # Create temperature
-    #     temp = Temperature(init_temperature).to(device)
-    #     optimizer_temp = optim.Adam(temp.parameters(), lr=temp_lr)
-
-    #     return cls(actor=actor, 
-    #               critic=critic,
-    #               target_critic=target_critic,
-    #               temp=temp,
-    #               optimizer_actor=optimizer_actor,
-    #               optimizer_critic=optimizer_critic,
-    #               optimizer_temp=optimizer_temp,
-    #               tau=tau,
-    #               discount=discount,
-    #               target_entropy=target_entropy,
-    #               num_qs=num_qs,
-    #               num_min_qs=num_min_qs,
-    #               backup_entropy=backup_entropy,
-    #               device=device)
-    
     @torch.inference_mode()
     def on_the_fly(self, base_policy, obs, sub_obs=None):
         # 1) obs의 value가 numpy인 경우
@@ -698,6 +617,368 @@ class fast_Expo(Agent):
             # stream_compute.wait_stream(stream_transfer)
             # mini_batch = gpu_batches[i]
             # mini_batch = _prepare_batch(batch, base_np, edit_np, next_base_np, next_edit_np, i, batch_size, self.device)
+
+            new_agent, critic_info = new_agent.update_critic(policy, mini_batch)
+        
+        # Update actor once
+        new_agent, actor_info = new_agent.update_actor(mini_batch)
+        # Update temperature once
+        new_agent, temp_info = new_agent.update_temperature(actor_info["entropy"])
+        
+        batch = {
+            "obs": mini_batch["base_obs"],
+            "action": mini_batch["actions"],
+        }
+
+        return new_agent, batch, {**actor_info, **critic_info, **temp_info}
+
+    def state_dict(self):
+        """Return state dict for saving model"""
+        return {
+            'actor': self.actor.state_dict(),
+            'critic': [net.state_dict() for net in self.critic.networks],
+            'target_critic': [net.state_dict() for net in self.target_critic.networks],
+            'temp': self.temp.state_dict(),
+            'optimizer_actor': self.optimizer_actor.state_dict(),
+            'optimizer_critic': self.optimizer_critic.state_dict(),
+            'optimizer_temp': self.optimizer_temp.state_dict(),
+        }
+    
+    def load_state_dict(self, state_dict):
+        """Load state dict"""
+        self.actor.load_state_dict(state_dict['actor'])
+        for i, net_state in enumerate(state_dict['critic']):
+            self.critic.networks[i].load_state_dict(net_state)
+        for i, net_state in enumerate(state_dict['target_critic']):
+            self.target_critic.networks[i].load_state_dict(net_state)
+        self.temp.load_state_dict(state_dict['temp'])
+        self.optimizer_actor.load_state_dict(state_dict['optimizer_actor'])
+        self.optimizer_critic.load_state_dict(state_dict['optimizer_critic'])
+        self.optimizer_temp.load_state_dict(state_dict['optimizer_temp'])
+        
+class fast_Lowdim_Expo(Agent):
+    def __init__(self,
+                 actor, 
+                 critic, 
+                 target_critic, 
+                 temp, 
+                 optimizer_actor, 
+                 optimizer_critic, 
+                 optimizer_temp,
+                 clip_beta: float,
+                 n_samples: int,
+                 tau: float, 
+                 discount: float, 
+                 target_entropy: float,
+                 num_qs: int = 2,
+                 num_min_qs: Optional[int] = None, 
+                 backup_entropy: bool = True, 
+                 device='cpu'):
+        
+        super().__init__(actor, device)
+        self.critic = critic
+        self.target_critic = target_critic
+        self.temp = temp
+        self.optimizer_actor = optimizer_actor
+        self.optimizer_critic = optimizer_critic
+        self.optimizer_temp = optimizer_temp
+        self.tau = tau
+        self.discount = discount
+        self.target_entropy = target_entropy
+        self.num_qs = num_qs
+        self.num_min_qs = num_min_qs or num_qs
+        self.backup_entropy = backup_entropy
+        self.clip_beta = clip_beta
+        self.n_samples = n_samples
+        
+    @classmethod
+    def create(cls,
+               seed: int,
+               observation_space: gym.Space,
+               action_space: gym.Space,
+               edit_policy_lr: float = 3e-4,
+               critic_lr: float = 3e-4,
+               temp_lr: float = 3e-4,
+               hidden_dims: Sequence[int] = (256, 256, 256),
+               discount: float = 0.99,
+               clip_beta: float = 0.1,
+               n_samples: int = 8,
+               tau: float = 0.005,
+               num_qs: int = 2,
+               num_min_qs: Optional[int] = None,
+               critic_dropout_rate: Optional[float] = None,
+               critic_layer_norm: bool = False,
+               target_entropy: Optional[float] = None,
+               init_temperature: float = 1.0,
+               backup_entropy: bool = True,
+               device: str = 'cpu'):
+        """
+        PyTorch implementation of Soft-Actor-Critic
+        """
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+
+        action_dim = action_space.shape[-1]
+        obs_dim = observation_space.shape[-1]
+
+        if target_entropy is None:
+            target_entropy = -action_dim / 2
+
+        # Create actor network  
+        actor_hidden_dims = list(hidden_dims)
+        actor_base_cls = partial(MLP, hidden_dims=actor_hidden_dims, activate_final=True)
+        actor_base_cls = partial(EditPolicy, base_cls=actor_base_cls, input_dim=obs_dim + action_dim)
+        actor = TanhNormal(actor_base_cls, action_dim).to(device)
+        optimizer_actor = optim.Adam(actor.parameters(), lr=edit_policy_lr)
+
+        # Create critic ensemble
+        critic_hidden_dims = list(hidden_dims)
+        critic_base_cls = partial(MLP, 
+                                activate_final=True,
+                                dropout_rate=critic_dropout_rate,
+                                use_layer_norm=critic_layer_norm)
+        
+        # Create critic ensemble using Ensemble wrapper
+        critic = Ensemble(
+            StateActionValue,
+            num=num_qs,
+            base_cls=critic_base_cls,
+            input_dim=obs_dim + action_dim,
+            hidden_dims=critic_hidden_dims
+        ).to(device)
+        
+        # Create target critic (deep copy)
+        target_critic = copy.deepcopy(critic)
+        
+        # Create optimizers
+        optimizer_critic = optim.Adam(critic.parameters(), lr=critic_lr)
+
+        # Create temperature
+        temp = Temperature(init_temperature).to(device)
+        optimizer_temp = optim.Adam(temp.parameters(), lr=temp_lr)
+
+        return cls(
+                  actor=actor, 
+                  critic=critic,
+                  target_critic=target_critic,
+                  temp=temp,
+                  optimizer_actor=optimizer_actor,
+                  optimizer_critic=optimizer_critic,
+                  optimizer_temp=optimizer_temp,
+                  clip_beta=clip_beta,
+                  n_samples=n_samples,
+                  tau=tau,
+                  discount=discount,
+                  target_entropy=target_entropy,
+                  num_qs=num_qs,
+                  num_min_qs=num_min_qs,
+                  backup_entropy=backup_entropy,
+                  device=device)
+        
+    @torch.inference_mode()
+    def on_the_fly(self, base_policy, obs, sub_obs=None):
+        # 1) obs의 value가 numpy인 경우
+        if sub_obs is None:
+            base_obs = to_tensor(np.expand_dims(obs, axis=0), device=self.device)
+            edit_obs = to_tensor(obs, device=self.device)
+        else:
+            base_obs = obs
+            edit_obs = sub_obs
+        B, To = base_obs.shape[:2]
+
+        # 2) base_policy 예측을 배치 차원으로 확장
+        base_obs = base_obs.repeat((self.n_samples), *[1] * (base_obs.dim() - 1))  # [n_samples*B, To, obs_dim]
+        input_dict = {'obs': base_obs}
+        action_base = base_policy.predict_action(input_dict)['action']  # [n_samples*B, To, action_dim]
+
+        # 3) actor 샘플도 벡터화
+        edit_obs = edit_obs.repeat((self.n_samples), *[1] * (edit_obs.dim() - 1))  # [n_samples*B, To, obs_dim]
+        obs_feat = edit_obs.reshape(self.n_samples*B, To, -1) # [n_samples*B, To, obs_feat_dim]
+        # base_action = action_base.reshape(self.n_samples, B, To, -1)  # [n_samples, B, To, action_dim]
+
+        delta_actions, _ = _sample_actions(self.actor, obs_feat, action_base, clip_beta=self.clip_beta)
+        # delta_actions = delta_actions.reshape(self.n_samples*B, To, -1)
+        edited_actions = action_base + delta_actions  # shape: [n_samples*B, To, action_dim]
+        actions = torch.cat([edited_actions, action_base], dim=0)  # [2*n_samples*B, To, action_dim]
+
+        # 4) critic 평가를 한번에
+        obs = edit_obs.unsqueeze(1).repeat(1, To, 1).repeat(2, 1, 1) # [n_samples*B, To, obs_feat_dim]
+        critics = subsample_ensemble(self.target_critic.networks, self.num_min_qs, self.num_qs, device=self.device)
+        qs = torch.stack([net(obs, actions) for net in critics], dim=0)
+        target_Q, _ = qs.min(dim=0)
+        
+        target_Q = target_Q.reshape(B, self.n_samples*2, -1) # [B, 2*n_samples, 1]
+        best_idx = target_Q.squeeze(-1).argmax(dim=1)  # (B,)
+
+        actions = actions.reshape(B, self.n_samples*2, To, -1) # [B, 2*n_samples, To, action_dim]
+        best_action = actions[torch.arange(B, device=self.device), best_idx]
+        
+        best = None
+        eps = 1e-6
+        if sub_obs is None:
+            best = np.clip(best_action.cpu().numpy(), -1.0+eps, 1.0-eps)
+        else:
+            best = torch.clamp(best_action, -1.0+eps, 1.0-eps)
+
+        return best, self
+
+    def update_actor(self, batch: DatasetDict) -> Tuple['fast_Expo', Dict[str, float]]:
+        observations = batch["observations"]
+        actions = batch["actions"]
+        base_obs_np = batch["base_obs"]
+        B, To = base_obs_np.shape[:2]
+        
+        self.optimizer_actor.zero_grad()
+        
+        # Sample actions from current policy
+        obs_feature = observations.reshape(B, To, -1)
+        
+        edit_actions, dist = _sample_actions(self.actor, obs_feature, actions, clip_beta=self.clip_beta)
+        
+        log_probs = dist.log_prob(edit_actions)
+        
+        # Get Q-values from all critics
+        q_values = []
+        for critic_net in self.critic.networks:
+            q_val = critic_net(obs_feature, (actions + edit_actions))  
+            q_values.append(q_val)
+        
+        # Average Q-values
+        q_values = torch.stack(q_values, dim=0).mean(dim=0)
+        
+        # Actor loss: maximize Q - temperature * log_prob
+        temperature = self.temp()
+        
+        actor_loss = (temperature * log_probs - q_values).mean()
+        
+        actor_loss.backward()
+        
+        self.optimizer_actor.step()
+        
+        return self, {
+            "edit_loss": actor_loss.item(),
+            "entropy": -log_probs.mean().item(),
+        }
+
+    def update_temperature(self, entropy: float) -> Tuple['fast_Expo', Dict[str, float]]:
+        self.optimizer_temp.zero_grad()
+        
+        temperature = self.temp()
+        temp_loss = temperature * (entropy - self.target_entropy)
+        
+        temp_loss.backward()
+        self.optimizer_temp.step()
+        
+        return self, {
+            "temperature": temperature.item(),
+            "temperature_loss": temp_loss.item()
+        }
+
+    def update_critic(self, policy, batch: DatasetDict) -> Tuple['fast_Expo', Dict[str, float]]:
+        observations = batch["observations"]
+        next_observations = batch["next_observations"]
+        actions = batch["actions"]
+        rewards = batch["rewards"]
+        masks = batch["masks"]
+        next_base_obs = batch["next_base_obs"]
+        
+        B, To = next_base_obs.shape[:2]
+        
+        self.optimizer_critic.zero_grad()
+        
+        with torch.no_grad():
+            # Sample next actions from policy
+            next_actions, _ = self.on_the_fly(base_policy=policy, obs=next_base_obs, sub_obs=next_observations)
+            
+            # Get target Q-values (use subset for REDQ if specified)
+            target_q_values = []
+            critics_to_use = subsample_ensemble(self.target_critic.networks, self.num_min_qs, self.num_qs, device=self.device)
+            encoded_next_obs = next_observations.reshape(B, To, -1)
+            for target_critic_net in critics_to_use:
+                target_q = target_critic_net(encoded_next_obs, next_actions)
+                target_q_values.append(target_q)
+
+            target_q = torch.stack(target_q_values, dim=0).min(dim=0)[0]
+            
+            # Compute target
+            rewards = rewards.view(B, 1)
+            masks = masks.view(B, 1)
+            target_q = rewards + self.discount * masks * target_q
+        
+        # Compute critic loss
+        critic_losses = []
+        q_predictions = []
+        encoded_obs = observations.reshape(B, To, -1)
+        for critic_net in self.critic.networks:
+            q_pred = critic_net(encoded_obs, actions)
+            critic_loss = F.mse_loss(q_pred, target_q)
+            critic_losses.append(critic_loss)
+            q_predictions.append(q_pred)
+        
+        total_critic_loss = sum(critic_losses)
+        
+        total_critic_loss.backward()
+        
+        self.optimizer_critic.step()
+        
+        # Soft update target networks
+        with torch.no_grad():
+            for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
+                target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+
+        return self, {
+            "critic_loss": total_critic_loss.item(),
+            "q": torch.stack(q_predictions, dim=0).mean().item()
+        }
+        
+    def merge_batch(self, online_data, offline_data, batch_size=128, utd_ratio=20):
+        merged_batch = {}
+
+        def merge(a, b):
+            a_reshaped = a.reshape(utd_ratio, batch_size, *a.shape[1:])
+            b_reshaped = b.reshape(utd_ratio, batch_size, *b.shape[1:])
+            return np.stack([a_reshaped, b_reshaped], axis=1).reshape(utd_ratio, batch_size * 2, *a.shape[1:])
+
+        for k, v in online_data.items():
+            if isinstance(v, dict):
+                merged_batch[k] = {sub_k: merge(v[sub_k], offline_data[k][sub_k]) for sub_k in v.keys()}
+            else:
+                merged_batch[k] = merge(v, offline_data[k])
+
+        return merged_batch
+
+    def update(self, policy, online_data: DatasetDict, offline_data: DatasetDict, utd_ratio: int):
+        new_agent = self
+        
+        assert len(online_data["actions"]) % utd_ratio == 0, "Online data length must be divisible by utd_ratio"
+
+        batch_size = len(online_data["actions"]) // utd_ratio
+        batch = self.merge_batch(online_data, offline_data, batch_size=batch_size, utd_ratio=utd_ratio)
+
+        batch["observations"] = batch["observations"].reshape(-1, *batch["observations"].shape[2:])
+        batch["next_observations"] = batch["next_observations"].reshape(-1, *batch["next_observations"].shape[2:])
+
+        obs = batch["observations"]
+        base_np = obs
+        edit_np = np.squeeze(obs, axis=1)
+        next_obs = batch["next_observations"]
+        next_base_np = next_obs
+        next_edit_np = np.squeeze(next_obs, axis=1)
+
+        batch_size *= 2
+        for i in range(utd_ratio):
+            start_idx = batch_size * i
+            end_idx = batch_size * (i + 1)
+
+            mini_batch = {
+                "observations": to_tensor(edit_np[start_idx:end_idx], self.device),
+                "next_observations": to_tensor(next_edit_np[start_idx:end_idx], self.device),
+                "base_obs": to_tensor(base_np[start_idx:end_idx], self.device),
+                "next_base_obs": to_tensor(next_base_np[start_idx:end_idx], self.device),
+                "actions": to_tensor(batch['actions'][i], self.device),
+                "rewards": to_tensor(batch["rewards"][i], self.device),
+                "masks": to_tensor(batch["masks"][i], self.device)
+            }
 
             new_agent, critic_info = new_agent.update_critic(policy, mini_batch)
         

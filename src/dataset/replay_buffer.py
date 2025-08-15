@@ -1,9 +1,11 @@
 import collections
-from typing import Optional, Union
+from typing import Optional, Union, Any
 
 import gym
 import gym.spaces
 import numpy as np
+import os
+import pickle
 
 from tqdm import tqdm
 from src.dataset.mdp_dataset import Dataset, DatasetDict
@@ -43,7 +45,17 @@ class ReplayBuffer(Dataset):
         action_space: gym.Space,
         capacity: int,
         next_observation_space: Optional[gym.Space] = None,
+        save_dir: str = "./data/robomimic/online/lowdim",
+        save_interval: int = 1000,
+        start_training: int = 5000,
     ):
+        self.save_dir = save_dir
+        self.save_interval = save_interval
+        self._insert_count = 0
+        self._start_training = start_training
+
+        os.makedirs(self.save_dir, exist_ok=True)
+        
         if next_observation_space is None:
             next_observation_space = observation_space
 
@@ -67,11 +79,37 @@ class ReplayBuffer(Dataset):
     def __len__(self) -> int:
         return self._size
 
-    def insert(self, data_dict: DatasetDict):
+    def insert(self, data_dict: DatasetDict, auto_save: bool = True):
         _insert_recursively(self.dataset_dict, data_dict, self._insert_index)
 
         self._insert_index = (self._insert_index + 1) % self._capacity
         self._size = min(self._size + 1, self._capacity)
+        
+        # auto save
+        if auto_save:
+            if (self._start_training >= 0) and (self._insert_count >= self._start_training) and (self._insert_count % self.save_interval) == 0:
+                self.save_to_pickle()
+            
+    def save_to_pickle(self):
+        filename = os.path.join(self.save_dir, f"replay_buffer_{len(self)}.pkl")
+        state = {
+            "dataset_dict": self.dataset_dict,
+            "_size": self._size,
+            "_capacity": self._capacity,
+            "_insert_index": self._insert_index,
+        }
+        with open(filename, "wb") as f:
+            pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"[Online Replay Buffer] Saved {filename}")
+
+    def load_from_pickle(self, filename: str):
+        with open(filename, "rb") as f:
+            state = pickle.load(f)
+        self.dataset_dict = state["dataset_dict"]
+        self._size = state["_size"]
+        self._capacity = state["_capacity"]
+        self._insert_index = state["_insert_index"]
+        print(f"[Online Replay Buffer] Resumed from {filename}")
 
     def get_iterator(self, queue_size: int = 2, sample_args: dict = {}):
         # PyTorch version - simplified iterator without device placement
@@ -88,3 +126,39 @@ class ReplayBuffer(Dataset):
         while queue:
             yield queue.popleft()
             enqueue(1)
+            
+    def init_replay_buffer_from_lowdim_demo_data(
+        self,
+        demo_data: Any,
+    ) -> "ReplayBuffer":    
+        episode_len = len(demo_data.episode_ends)
+
+        # Parse episode boundaries
+        for idx in tqdm(range(episode_len), desc="Processing episodes"):
+            episode = demo_data.get_episode(idx)
+            episode_steps = len(episode["obs"])
+            for t in range(episode_steps - 1):
+                obs = episode["obs"][t]
+                next_obs = episode["obs"][t + 1]
+
+                action = episode["action"][t]
+                if t == (episode_steps - 2):
+                    reward = 1.0
+                    done = True
+                    mask = 0.0
+                else :
+                    reward = 0.0
+                    done = False
+                    mask = 1.0 
+
+                # Insert into buffer
+                self.insert(
+                    dict(
+                        observations=obs,
+                        actions=action,
+                        rewards=reward,
+                        masks=mask,
+                        dones=done,
+                        next_observations=next_obs,
+                    )
+                )

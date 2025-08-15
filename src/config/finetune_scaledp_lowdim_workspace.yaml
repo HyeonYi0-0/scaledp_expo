@@ -1,37 +1,35 @@
 # Configuration for ScaleDP Finetuning Workspace
 defaults:
   - _self_
-  - task: square_image
+  - task: square_lowdim
 
 # Project settings
-name: "finetune_robomimic_image"
-_target_: src.workspace.finetune_scaledp_workspace.finetuneScaleDPWorkspace
+name: "finetune_robomimic_lowdim"
+_target_: src.workspace.finetune_scaledp_lowdim_workspace.finetuneScaleDPLowdimWorkspace
 
+obs_dim: ${task.obs_dim}
+action_dim: ${task.action_dim}
+transition_dim: "${eval: ${task.obs_dim} + ${task.action_dim}}"
 task_name: ${task.name}
-shape_meta: ${task.shape_meta}
 exp_name: "default"
 
 horizon: 1
 n_obs_steps: 1
 n_action_steps: 1
-seed: 0
+seed: 42
 n_latency_steps: 0
-dataset_obs_steps: 1
 past_action_visible: False
 keypoint_visible_rate: 1.0
 obs_as_cond: True
+pred_action_steps_only: False
 
 policy:
-  _target_: src.policy.ScaleDP_hybrid_image_policy.ScaleDiffusionTransformerHybridImagePolicy
+  _target_: src.policy.ScaleDP_lowdim_policy.ScaleDiffusionTransformerLowdimPolicy
+  action_dim: ${action_dim}
+  obs_dim: ${obs_dim}
 
   model_size: 'ScaleDP_B'       # ScaleDP model size -> 'ScaleDP_H', 'ScaleDP_L', 'ScaleDP_B', 'ScaleDP_S', 'ScaleDP_Ti'
-  shape_meta: ${shape_meta}
-  crop_shape: [76,76]           # robomimic [76, 76], libero [200, 200]
-
-  # oc.select resolver: key, default
-  task_name: ${oc.select:task.task_name,square}
-  dataset_type: ${oc.select:task.dataset_type,ph}
-
+  
   noise_scheduler:
     _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
     beta_end: 0.02
@@ -46,10 +44,8 @@ policy:
   n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
   n_obs_steps: ${n_obs_steps}
   num_inference_steps: 100
-  obs_encoder_group_norm: True
-  eval_fixed_crop: True
   obs_as_cond: ${obs_as_cond}
-  pred_action_steps_only: False  # Only predict action steps, not the full trajectory
+  pred_action_steps_only: ${pred_action_steps_only}
 
 ema:
   _target_: src.model.diffusion.ema_model.EMAModel
@@ -63,9 +59,9 @@ ema:
 log_interval: 100
 save_interval: 100
 offline_save_dir: "./data/robomimic/lowdim/offline/"
-offline_buffer_file_name: "replay_buffer.pkl"
+offline_buffer_file_name: "replay_buffer_29954.pkl"
 online_save_dir: "./data/robomimic/lowdim/online/${now:%H.%M.%S}/"
-online_buffer_file_name: "replay_buffer_7144.pkl"
+online_buffer_file_name: "replay_buffer.pkl"
 
 # Training settings
 utd_ratio: 10
@@ -95,19 +91,19 @@ agent:
   init_temperature: 1.0
   backup_entropy: false
   ckpt_name: "agent.pt" # "/data_8tb/sanhak2025/scaledp_expo/data/outputs/2025.08.12/20.20.12_finetune_robomimic_image_square_image/checkpoints/agent/step=0000-test_mean_score=0.520.pt"
-  device: "cuda:0"  # or "cuda"
+  device: "cuda:1"  # or "cuda"
 
 # Training configuration
 training:
   seed: 42
-  device: "cuda:0"  # or "cuda"
+  device: "cuda:1"  # or "cuda"
   use_ema: True
   lr_scheduler: "cosine"
   lr_warmup_steps: 100
   gradient_accumulate_every: 1
-  debug: True
-  resume: "data/outputs/2025.08.11/16.54.25_train_robomimic_image_square_image/checkpoints" 
-  ckpt_name: "epoch=0420-test_mean_score=0.680.ckpt"  # Name of the checkpoint to resume from
+  debug: False
+  resume: "/data/outputs/2025.08.14/18.56.50_train_robomimic_lowdim_square_lowdim/checkpoints/" 
+  ckpt_name: "epoch=0420-test_mean_score=0.840.ckpt"  # Name of the checkpoint to resume from
   num_cycles: 1000
   rollout_every: 1000       # 단위: step
   checkpoint_every: 1000    # 단위: step
@@ -134,8 +130,7 @@ logging:
 
 # Optimizer configuration
 optimizer:
-  transformer_weight_decay: 1.0e-1
-  obs_encoder_weight_decay: 1.0e-6
+  weight_decay: 1.0e-1
   learning_rate: 1.0e-4
   betas: [0.9, 0.99]
 

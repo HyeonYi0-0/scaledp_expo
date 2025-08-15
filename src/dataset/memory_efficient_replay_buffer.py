@@ -19,17 +19,11 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
         action_space: gym.Space,
         capacity: int,
         pixel_keys: Tuple[str, ...] = ("pixels",),
-        save_dir: str = "./data/online/save",
-        save_interval: int = 100,
+        save_dir: str = "./data/robomimic/online/lowdim",
+        save_interval: int = 1000,
         start_training: int = 5000,
     ):
         self.pixel_keys = pixel_keys
-        self.save_dir = save_dir
-        self.save_interval = save_interval
-        self._insert_count = 0
-        self._start_training = start_training
-
-        os.makedirs(self.save_dir, exist_ok=True)
 
         observation_space = copy.deepcopy(observation_space)
         self._num_stack = None
@@ -61,6 +55,9 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
             action_space,
             capacity,
             next_observation_space=next_observation_space,
+            save_dir=save_dir,
+            save_interval=save_interval,
+            start_training=start_training,
         )
 
     def insert(self, data_dict: DatasetDict):
@@ -71,7 +68,7 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
             for indx in indxs:
                 element = super().sample(1, indx=indx)
                 self._is_correct_index[self._insert_index] = False
-                super().insert(element)
+                super().insert(element, auto_save=False)
 
         data_dict = data_dict.copy()
         
@@ -99,7 +96,7 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
                     # print(f"Stacking {pixel_key} at index {self._insert_index}: {data_dict['observations'][pixel_key].shape}")
 
                 self._is_correct_index[self._insert_index] = False
-                super().insert(data_dict)
+                super().insert(data_dict, auto_save=False)
 
         for pixel_key in self.pixel_keys:
             data_dict["observations"][pixel_key] = next_obs_pixels[pixel_key][..., -1]
@@ -107,7 +104,7 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
         self._first = data_dict["dones"]
 
         self._is_correct_index[self._insert_index] = True
-        super().insert(data_dict)
+        super().insert(data_dict, auto_save=False)
 
         for i in range(self._num_stack):
             indx = (self._insert_index + i) % len(self)
@@ -222,7 +219,6 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
     def init_replay_buffer_from_demo_data(
         self,
         demo_data: Any,
-        pixel_keys: Tuple[str, ...] = ("pixels",),
     ) -> "MemoryEfficientReplayBuffer":
         # Load zarr dataset
         root = demo_data
@@ -245,7 +241,7 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
                     "robot0_gripper_qpos": data["robot0_gripper_qpos"][t + 1],
                 }
 
-                for key in pixel_keys:
+                for key in self.pixel_keys:
                     obs[key] = data[key][t]
                     next_obs[key] = data[key][t + 1]
 
