@@ -78,7 +78,7 @@ class BaseWorkspace:
             file_name = os.path.basename(path)
             name, _ = os.path.splitext(file_name)
             agent_ckpt_path = os.path.join(agent_ckpt_dir, f"{name}.pt")
-            if not os.path.isfile(agent_ckpt_path): 
+            if not os.path.isfile(agent_ckpt_path) or (name == "latest"): 
                 torch.save({
                     'agent_state_dict': agent.state_dict() if hasattr(agent, 'state_dict') else agent,
                     'step': step_log['step'],

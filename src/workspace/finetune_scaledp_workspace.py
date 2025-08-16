@@ -207,8 +207,9 @@ class finetuneScaleDPWorkspace(BaseWorkspace):
             agent_ckpt_path = pathlib.Path(cfg.training.resume, cfg.agent.ckpt_name)
             if os.path.isfile(agent_ckpt_path):
                 print(f"Loading agent from {agent_ckpt_path}")
-                checkpoint = torch.load(agent_ckpt_path)
+                checkpoint = torch.load(agent_ckpt_path, map_location=cfg.agent.device)
                 start_step = checkpoint.get('step', 0)
+                print("start step: ", start_step)
                 agent.load_state_dict(checkpoint['agent_state_dict'])
             else:
                 print(f"Agent checkpoint not found at {agent_ckpt_path}, starting from scratch.")

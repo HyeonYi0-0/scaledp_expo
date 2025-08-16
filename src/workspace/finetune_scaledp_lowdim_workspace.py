@@ -100,7 +100,6 @@ class finetuneScaleDPLowdimWorkspace(BaseWorkspace):
         env = env_runner.get_environment()
         env = gym.wrappers.RecordEpisodeStatistics(env, deque_size=1)
         env.seed(cfg.seed)
-
         # configure RL replay buffer
         offline_replay_buffer_size = cfg.replay_buffer_size
         offline_replay_buffer = ReplayBuffer(
@@ -205,8 +204,9 @@ class finetuneScaleDPLowdimWorkspace(BaseWorkspace):
             agent_ckpt_path = pathlib.Path(cfg.training.resume, cfg.agent.ckpt_name)
             if os.path.isfile(agent_ckpt_path):
                 print(f"Loading agent from {agent_ckpt_path}")
-                checkpoint = torch.load(agent_ckpt_path)
+                checkpoint = torch.load(agent_ckpt_path, map_location=cfg.agent.device)
                 start_step = checkpoint.get('step', 0)
+                print("start step: ", start_step)
                 agent.load_state_dict(checkpoint['agent_state_dict'])
             else:
                 print(f"Agent checkpoint not found at {agent_ckpt_path}, starting from scratch.")
