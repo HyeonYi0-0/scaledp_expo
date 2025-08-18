@@ -34,48 +34,47 @@ class MLP(nn.Module):
         self.use_layer_norm = use_layer_norm
         self.scale_final = scale_final
         self.dropout_rate = dropout_rate
-        
-        layers = []
-        
-        if self.use_layer_norm and len(hidden_dims) > 0:
-            self.input_layer_norm = nn.LayerNorm(hidden_dims[0])
-        
+
+        self.layers = nn.ModuleList()
+        self.layer_norms = nn.ModuleList()
+
         for i in range(len(hidden_dims) - 1):
             in_features = hidden_dims[i]
             out_features = hidden_dims[i + 1]
-            
+
+            layer = nn.Linear(in_features, out_features)
             if i == len(hidden_dims) - 2 and self.scale_final is not None:
-                layer = nn.Linear(in_features, out_features)
                 nn.init.xavier_uniform_(layer.weight, gain=self.scale_final)
             else:
-                layer = nn.Linear(in_features, out_features)
                 nn.init.xavier_uniform_(layer.weight)
-            
             nn.init.zeros_(layer.bias)
-            layers.append(layer)
-            
-            # Add dropout and activation if not the final layer, or if activate_final is True
-            if i < len(hidden_dims) - 2 or self.activate_final:
-                if self.dropout_rate is not None and self.dropout_rate > 0:
-                    layers.append(nn.Dropout(self.dropout_rate))
-        
-        self.layers = nn.ModuleList(layers)
+            self.layers.append(layer)
+
+            # 각 레이어마다 LayerNorm을 옵션으로 추가
+            if self.use_layer_norm:
+                self.layer_norms.append(nn.LayerNorm(out_features))
+            else:
+                self.layer_norms.append(nn.Identity())
+
+        # Dropout은 forward에서만 사용
+        self.dropout = nn.Dropout(self.dropout_rate) if self.dropout_rate is not None else nn.Identity()
 
     def forward(self, x: torch.Tensor, training: bool = False) -> torch.Tensor:
-        if hasattr(self, 'input_layer_norm'):
-            x = self.input_layer_norm(x)
-            
-        layer_idx = 0
-        for i in range(len(self.hidden_dims) - 1):
-            x = self.layers[layer_idx](x)
-            layer_idx += 1
-            
-            # Apply dropout and activation if not the final layer, or if activate_final is True
-            if i < len(self.hidden_dims) - 2 or self.activate_final:
+        for i, layer in enumerate(self.layers):
+            x = layer(x)
+
+            # Activation 적용
+            if i < len(self.layers) - 1 or self.activate_final:
+                # Dropout 적용
                 if self.dropout_rate is not None and self.dropout_rate > 0:
-                    if training and layer_idx < len(self.layers):
-                        x = self.layers[layer_idx](x)
-                        layer_idx += 1
+                    if training:
+                        # print("dropOut")
+                        x = self.dropout(x)
+
+                # LayerNorm 적용
+                if self.use_layer_norm:
+                    # print("layerNorm")
+                    x = self.layer_norms[i](x)
                 x = self.activations(x)
-        
+
         return x

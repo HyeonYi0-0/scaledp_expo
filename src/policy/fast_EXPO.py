@@ -11,6 +11,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
 
+from torchinfo import summary
 from src.distributions import TanhNormal
 from src.model import MLP, Ensemble, StateActionValue, subsample_ensemble
 from src.common.robomimic_config_util import get_robomimic_config
@@ -281,6 +282,9 @@ class fast_Expo(Agent):
         torch.manual_seed(seed)
         np.random.seed(seed)
 
+        print("Use Critic layer Norm: ", critic_layer_norm)
+        print("Critic dropout rate: ", critic_dropout_rate)
+
         action_dim = action_space.shape[-1]
 
         if target_entropy is None:
@@ -299,7 +303,7 @@ class fast_Expo(Agent):
         # Create actor network  
         obs_feature_dim = actor_obs_encoder.output_shape()[0]
         actor_hidden_dims = list(hidden_dims)
-        actor_base_cls = partial(MLP, hidden_dims=actor_hidden_dims, activate_final=True)
+        actor_base_cls = partial(MLP, hidden_dims=actor_hidden_dims, use_layer_norm=True, activate_final=True)
         actor_base_cls = partial(EditPolicy, base_cls=actor_base_cls, input_dim=obs_feature_dim + action_dim)
         actor = TanhNormal(actor_base_cls, action_dim).to(device)
         optim_groups = [{'params': actor.parameters()}, {'params': actor_obs_encoder.parameters()}]
@@ -332,6 +336,10 @@ class fast_Expo(Agent):
         temp = Temperature(init_temperature).to(device)
         optimizer_temp = optim.Adam(temp.parameters(), lr=temp_lr)
 
+        print(actor)
+        print(critic)
+        print(temp)
+
         return cls(
                   shape_meta=shape_meta,
                   actor=actor, 
@@ -354,7 +362,7 @@ class fast_Expo(Agent):
                   device=device)
         
     @torch.inference_mode()
-    def on_the_fly(self, base_policy, obs, sub_obs=None):
+    def on_the_fly(self, base_policy, obs, sub_obs=None, training=False):
         # 1) obs의 value가 numpy인 경우
         if sub_obs is None:
             np_obs_dict, edit_obs_dict = get_real_obs_dict(env_obs=obs, shape_meta=self.shape_meta)
@@ -387,7 +395,7 @@ class fast_Expo(Agent):
         # 4) critic 평가를 한번에
         encoded_obs = self.critic_obs_encoder(edit_obs).unsqueeze(1).repeat(1, To, 1).repeat(2, 1, 1) # [n_samples*B, To, obs_feat_dim]
         critics = subsample_ensemble(self.target_critic.networks, self.num_min_qs, self.num_qs, device=self.device)
-        qs = torch.stack([net(encoded_obs, actions) for net in critics], dim=0)
+        qs = torch.stack([net(encoded_obs, actions, training=training) for net in critics], dim=0)
         target_Q, _ = qs.min(dim=0)
         
         # target_Q = target_Q.reshape(self.n_samples*2, B, -1)
@@ -431,7 +439,7 @@ class fast_Expo(Agent):
         q_values = []
         encoded_obs = self.critic_obs_encoder(observations).reshape(B, To, -1)
         for critic_net in self.critic.networks:
-            q_val = critic_net(encoded_obs, (actions + edit_actions))  
+            q_val = critic_net(encoded_obs, (actions + edit_actions), training=True)  
             q_values.append(q_val)
         
         # Average Q-values
@@ -483,14 +491,14 @@ class fast_Expo(Agent):
         
         with torch.no_grad():
             # Sample next actions from policy
-            next_actions, _ = self.on_the_fly(base_policy=policy, obs=next_base_obs, sub_obs=next_observations)
+            next_actions, _ = self.on_the_fly(base_policy=policy, obs=next_base_obs, sub_obs=next_observations, training=True)
             
             # Get target Q-values (use subset for REDQ if specified)
             target_q_values = []
             critics_to_use = subsample_ensemble(self.target_critic.networks, self.num_min_qs, self.num_qs, device=self.device)
             encoded_next_obs = self.critic_obs_encoder(next_observations).reshape(B, To, -1)
             for target_critic_net in critics_to_use:
-                target_q = target_critic_net(encoded_next_obs, next_actions)
+                target_q = target_critic_net(encoded_next_obs, next_actions, training=True)
                 target_q_values.append(target_q)
                 
             # target_q_values = torch.stack([
@@ -520,7 +528,7 @@ class fast_Expo(Agent):
         q_predictions = []
         encoded_obs = self.critic_obs_encoder(observations).reshape(B, To, -1)
         for critic_net in self.critic.networks:
-            q_pred = critic_net(encoded_obs, actions)
+            q_pred = critic_net(encoded_obs, actions, training=True)
             critic_loss = F.mse_loss(q_pred, target_q)
             critic_losses.append(critic_loss)
             q_predictions.append(q_pred)
@@ -718,16 +726,20 @@ class fast_Lowdim_Expo(Agent):
         torch.manual_seed(seed)
         np.random.seed(seed)
 
+        print("Use Critic layer Norm: ", critic_layer_norm)
+        print("Critic dropout rate: ", critic_dropout_rate)
+
         action_dim = action_space.shape[-1]
         obs_dim = observation_space.shape[-1]
+        input_dim = obs_dim + action_dim
 
         if target_entropy is None:
             target_entropy = -action_dim / 2
 
         # Create actor network  
         actor_hidden_dims = list(hidden_dims)
-        actor_base_cls = partial(MLP, hidden_dims=actor_hidden_dims, activate_final=True)
-        actor_base_cls = partial(EditPolicy, base_cls=actor_base_cls, input_dim=obs_dim + action_dim)
+        actor_base_cls = partial(MLP, hidden_dims=actor_hidden_dims, use_layer_norm=True, activate_final=True)
+        actor_base_cls = partial(EditPolicy, base_cls=actor_base_cls, input_dim=input_dim)
         actor = TanhNormal(actor_base_cls, action_dim).to(device)
         optimizer_actor = optim.Adam(actor.parameters(), lr=edit_policy_lr)
 
@@ -743,7 +755,7 @@ class fast_Lowdim_Expo(Agent):
             StateActionValue,
             num=num_qs,
             base_cls=critic_base_cls,
-            input_dim=obs_dim + action_dim,
+            input_dim=input_dim,
             hidden_dims=critic_hidden_dims
         ).to(device)
         
@@ -756,6 +768,10 @@ class fast_Lowdim_Expo(Agent):
         # Create temperature
         temp = Temperature(init_temperature).to(device)
         optimizer_temp = optim.Adam(temp.parameters(), lr=temp_lr)
+
+        print(actor)
+        print(critic)
+        print(temp)
 
         return cls(
                   actor=actor, 
@@ -776,7 +792,7 @@ class fast_Lowdim_Expo(Agent):
                   device=device)
         
     @torch.inference_mode()
-    def on_the_fly(self, base_policy, obs, sub_obs=None):
+    def on_the_fly(self, base_policy, obs, sub_obs=None, training=False):
         # 1) obs의 value가 numpy인 경우
         if sub_obs is None:
             base_obs = to_tensor(np.expand_dims(obs, axis=0), device=self.device)
@@ -799,6 +815,7 @@ class fast_Lowdim_Expo(Agent):
         # base_action = action_base.reshape(self.n_samples, B, To, -1)  # [n_samples, B, To, action_dim]
 
         # delta_actions, _ = _sample_actions(self.actor, obs_feat, base_action, clip_beta=self.clip_beta)
+        # print("on the fly: actor action sampling")
         delta_actions, _ = _sample_actions(self.actor, base_obs, action_base, clip_beta=self.clip_beta)
         # print("delta actions shape:", delta_actions.shape)
         # delta_actions = delta_actions.reshape(self.n_samples*B, To, -1)
@@ -810,8 +827,9 @@ class fast_Lowdim_Expo(Agent):
         # obs = edit_obs.unsqueeze(1).repeat(1, To, 1).repeat(2, 1, 1) # [n_samples*B, To, obs_feat_dim]
         obs = base_obs.repeat(1, To, 1).repeat(2, 1, 1) # [n_samples*B, To, obs_feat_dim]
         # print("For critic obs shape:", obs.shape)
+        # print("on the fly subsample ensemble")
         critics = subsample_ensemble(self.target_critic.networks, self.num_min_qs, self.num_qs, device=self.device)
-        qs = torch.stack([net(obs, actions) for net in critics], dim=0)
+        qs = torch.stack([net(obs, actions, training=training) for net in critics], dim=0)
         target_Q, _ = qs.min(dim=0)
         
         target_Q = target_Q.reshape(B, self.n_samples*2, -1) # [B, 2*n_samples, 1]
@@ -842,6 +860,7 @@ class fast_Lowdim_Expo(Agent):
         # obs_feature = observations.reshape(B, To, -1)
         
         # edit_actions, dist = _sample_actions(self.actor, obs_feature, actions, clip_beta=self.clip_beta)
+        # print("actor: action sample")
         edit_actions, dist = _sample_actions(self.actor, observations, actions, clip_beta=self.clip_beta)
         # print("edit action shape:", edit_actions.shape)
 
@@ -849,9 +868,10 @@ class fast_Lowdim_Expo(Agent):
         
         # Get Q-values from all critics
         q_values = []
+        # print("============== actor: critic all update")
         for critic_net in self.critic.networks:
             # q_val = critic_net(obs_feature, (actions + edit_actions))  
-            q_val = critic_net(observations, (actions + edit_actions))
+            q_val = critic_net(observations, (actions + edit_actions), training=True)
             q_values.append(q_val)
         
         # Average Q-values
@@ -901,16 +921,18 @@ class fast_Lowdim_Expo(Agent):
         with torch.no_grad():
             # Sample next actions from policy
             # next_actions, _ = self.on_the_fly(base_policy=policy, obs=next_base_obs, sub_obs=next_observations)
-            next_actions, _ = self.on_the_fly(base_policy=policy, obs=next_observations, sub_obs={})
+            # print("==============critic: on the fly")
+            next_actions, _ = self.on_the_fly(base_policy=policy, obs=next_observations, sub_obs={}, training=True)
             # print("next_actions shape:", next_actions.shape)
             
             # Get target Q-values (use subset for REDQ if specified)
             target_q_values = []
             critics_to_use = subsample_ensemble(self.target_critic.networks, self.num_min_qs, self.num_qs, device=self.device)
             # encoded_next_obs = next_observations.reshape(B, To, -1)
+            # print("===============critic: subsample ensemble")
             for target_critic_net in critics_to_use:
                 # target_q = target_critic_net(encoded_next_obs, next_actions)
-                target_q = target_critic_net(next_observations, next_actions)
+                target_q = target_critic_net(next_observations, next_actions, training=True)
                 target_q_values.append(target_q)
 
             target_q = torch.stack(target_q_values, dim=0).min(dim=0)[0]
@@ -924,9 +946,10 @@ class fast_Lowdim_Expo(Agent):
         critic_losses = []
         q_predictions = []
         # encoded_obs = observations.reshape(B, To, -1)
+        # print("=============== critic update")
         for critic_net in self.critic.networks:
             # q_pred = critic_net(encoded_obs, actions)
-            q_pred = critic_net(observations, actions)
+            q_pred = critic_net(observations, actions, training=True)
             critic_loss = F.mse_loss(q_pred, target_q)
             critic_losses.append(critic_loss)
             q_predictions.append(q_pred)
@@ -965,6 +988,7 @@ class fast_Lowdim_Expo(Agent):
 
     def update(self, policy, online_data: DatasetDict, offline_data: DatasetDict, utd_ratio: int):
         new_agent = self
+        # print("======== start update")
         
         assert len(online_data["actions"]) % utd_ratio == 0, "Online data length must be divisible by utd_ratio"
 
@@ -990,6 +1014,7 @@ class fast_Lowdim_Expo(Agent):
         for i in range(utd_ratio):
             # start_idx = batch_size * i
             # end_idx = batch_size * (i + 1)
+            # print("================== Critic update", i)
 
             mini_batch = {
                 "observations": to_tensor(batch["observations"][i], self.device),
