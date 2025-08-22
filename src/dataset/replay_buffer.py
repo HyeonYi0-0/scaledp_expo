@@ -6,6 +6,8 @@ import gym.spaces
 import numpy as np
 import os
 import pickle
+import glob
+import re
 
 from tqdm import tqdm
 from src.dataset.mdp_dataset import Dataset, DatasetDict
@@ -23,7 +25,22 @@ def _init_replay_dict(
         return data_dict
     else:
         raise TypeError()
+    
+def _slice_replay_dict(dataset_dict, start, end):
+    if isinstance(dataset_dict, np.ndarray):
+        return dataset_dict[start:end]
+    elif isinstance(dataset_dict, dict):
+        return {k: _slice_replay_dict(v, start, end) for k, v in dataset_dict.items()}
+    else:
+        raise TypeError()
 
+def _get_item_from_replay_dict(dataset_dict, index):
+    if isinstance(dataset_dict, np.ndarray):
+        return dataset_dict[index]
+    elif isinstance(dataset_dict, dict):
+        return {k: _get_item_from_replay_dict(v, index) for k, v in dataset_dict.items()}
+    else:
+        raise TypeError()
 
 def _insert_recursively(
     dataset_dict: DatasetDict, data_dict: DatasetDict, insert_index: int
@@ -89,8 +106,53 @@ class ReplayBuffer(Dataset):
         if auto_save:
             self._insert_count += 1
             if (self._start_training >= 0) and (self._insert_count >= self._start_training) and (self._insert_count % self.save_interval) == 0:
-                self.save_to_pickle()
+                self.save_chunk()
+                
+    def save_chunk(self):
+        start = max(0, self._insert_index - self.save_interval)
+        end = self._insert_index
+        filename = os.path.join(self.save_dir, f"chunk_{end}.pkl")
+
+        state = {
+            "observations": _slice_replay_dict(self.dataset_dict["observations"], start, end),
+            "next_observations": _slice_replay_dict(self.dataset_dict["next_observations"], start, end),
+            "actions": self.dataset_dict["actions"][start:end],
+            "rewards": self.dataset_dict["rewards"][start:end],
+            "masks": self.dataset_dict["masks"][start:end],
+            "dones": self.dataset_dict["dones"][start:end],
+        }
+        with open(filename, "wb") as f:
+            pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
             
+    def load_all_chunks(self, folder: str):
+        """Load all chunk files from a folder (resume mode)."""
+        # chunk 파일 목록 정렬 (숫자 기준 정렬)
+        files = glob.glob(os.path.join(folder, "chunk_*.pkl"))
+        files.sort(key=lambda x: int(re.search(r"chunk_(\d+)\.pkl", x).group(1)))
+
+        total_loaded = 0
+        for filename in files:
+            with open(filename, "rb") as f:
+                state = pickle.load(f)
+
+            n = len(state["actions"])
+            for i in range(n):
+                data_dict = {
+                    "observations": _get_item_from_replay_dict(state["observations"], i),
+                    "next_observations": _get_item_from_replay_dict(state["next_observations"], i),
+                    "actions": state["actions"][i],
+                    "rewards": state["rewards"][i],
+                    "masks": state["masks"][i],
+                    "dones": state["dones"][i],
+                }
+                # 버퍼에 삽입
+                self.insert(data_dict, auto_save=False)
+
+            total_loaded += n
+            print(f"[Online Replay Buffer] Loaded {n} transitions from {filename}")
+
+        print(f"[Online Replay Buffer] Resume complete, total {total_loaded} transitions loaded.")
+                
     def save_to_pickle(self):
         filename = os.path.join(self.save_dir, f"replay_buffer_{len(self)}.pkl")
         state = {

@@ -60,7 +60,7 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
             start_training=start_training,
         )
 
-    def insert(self, data_dict: DatasetDict):
+    def insert(self, data_dict: DatasetDict, auto_save: bool = True):
         self._insert_count += 1
         
         if self._insert_index == 0 and self._capacity == len(self) and not self._first:
@@ -111,8 +111,9 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
             self._is_correct_index[indx] = False
         
         # auto save
-        if (self._start_training >= 0) and (self._insert_count >= self._start_training) and (self._insert_count % self.save_interval) == 0:
-            self.save_to_pickle()
+        if auto_save:
+            if (self._start_training >= 0) and (self._insert_count >= self._start_training) and (self._insert_count % self.save_interval) == 0:
+                self.save_chunk()
             
     def save_to_pickle(self):
         filename = os.path.join(self.save_dir, f"replay_buffer_{len(self)}.pkl")
