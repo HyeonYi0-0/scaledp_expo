@@ -221,6 +221,7 @@ class finetuneScaleDPLowdimWorkspace(BaseWorkspace):
         observation, done = env.reset(), False
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
         with JsonLogger(log_path) as json_logger:
+            success_cnt = 0
             step_log = dict()
             train_losses = list()
             for step_t in tqdm.tqdm(
@@ -236,6 +237,10 @@ class finetuneScaleDPLowdimWorkspace(BaseWorkspace):
                 policy.train()
                 
                 next_observation, reward, done, info = env.step(action)
+                
+                if reward:
+                    success_cnt += 1
+                    done = True
                 
                 mask = 1.0 if not done or "TimeLimit.truncated" in info else 0.0
 
@@ -331,6 +336,10 @@ class finetuneScaleDPLowdimWorkspace(BaseWorkspace):
                         # replace train_loss with log_interval average
                         train_loss = np.mean(train_losses)
                         step_log['base_train_loss'] = train_loss
+                        
+                        if step_t % 2000 == 0: 
+                            step_log["success_count"] = success_cnt
+                            success_cnt = 0
 
                         # agent logging
                         for k, v in update_info.items():
